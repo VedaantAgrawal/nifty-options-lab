@@ -63,6 +63,18 @@ class TestOptionLeg:
         with pytest.raises(ValidationError):
             make_leg(side="hold")
 
+    def test_exit_price_defaults_to_none_when_omitted(self):
+        leg = OptionLeg(strike=24500, option_type="CE", side="sell", entry_price=150.0, lots=1)
+        assert leg.exit_price is None
+
+    def test_exit_price_none_is_explicitly_allowed(self):
+        leg = make_leg(exit_price=None)
+        assert leg.exit_price is None
+
+    def test_exit_price_negative_raises(self):
+        with pytest.raises(ValidationError):
+            make_leg(exit_price=-10)
+
 
 def make_trade(**overrides):
     defaults = dict(
@@ -124,6 +136,11 @@ class TestTrade:
     def test_capital_at_risk_must_be_positive(self):
         with pytest.raises(ValidationError):
             make_trade(capital_at_risk=0)
+
+    def test_leg_with_unset_exit_price_raises(self):
+        open_leg = make_leg(exit_price=None)
+        with pytest.raises(ValidationError):
+            make_trade(legs=[open_leg])
 
 
 def make_config(**overrides):

@@ -28,7 +28,15 @@ class OptionLeg(BaseModel):
     option_type: Literal["CE", "PE"]
     side: Literal["buy", "sell"]
     entry_price: float = Field(gt=0, description="Premium paid/received at entry")
-    exit_price: float = Field(ge=0, description="Premium paid/received at exit (0 if expired worthless)")
+    exit_price: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Premium paid/received at exit (0 if expired worthless); None if the leg "
+            "hasn't been closed yet, e.g. as returned by engine/position_builder.py "
+            "before a trade is closed and wrapped into a Trade"
+        ),
+    )
     lots: int = Field(gt=0, description="Number of lots traded for this leg")
 
     @field_validator("strike")
@@ -60,6 +68,12 @@ class Trade(BaseModel):
             raise ValueError("exit_date must be on or before expiry_date")
         if self.exit_reason == "expiry" and self.exit_date != self.expiry_date:
             raise ValueError("exit_reason='expiry' requires exit_date == expiry_date")
+        return self
+
+    @model_validator(mode="after")
+    def _all_legs_are_closed(self) -> "Trade":
+        if any(leg.exit_price is None for leg in self.legs):
+            raise ValueError("every leg must have exit_price set for a closed Trade")
         return self
 
 
