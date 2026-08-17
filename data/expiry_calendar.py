@@ -131,3 +131,44 @@ def next_weekly_expiry(
                 return adjusted
         d += timedelta(days=1)
     raise UnsupportedDateError(f"Could not find a weekly expiry within 20 days of {from_date}")
+
+
+def _last_weekday_match_in_month(year: int, month: int) -> date:
+    """Scan backward from month-end for the last date whose weekday matches its own regime."""
+    if month == 12:
+        next_month_first = date(year + 1, 1, 1)
+    else:
+        next_month_first = date(year, month + 1, 1)
+    d = next_month_first - timedelta(days=1)
+    for _ in range(31):
+        if d.weekday() == weekday_for_date(d):
+            return d
+        d -= timedelta(days=1)
+    raise UnsupportedDateError(f"Could not find a monthly expiry weekday in {year}-{month:02d}")
+
+
+def next_monthly_expiry(
+    from_date: date,
+    holidays: Optional[HolidayCalendar] = None,
+    inclusive: bool = True,
+) -> date:
+    """Return the next NIFTY monthly expiry date on/after `from_date`.
+
+    "Monthly expiry" = the last trading day in a calendar month matching
+    that period's weekly-expiry weekday convention, holiday-shifted like
+    weekly expiries. Mid-month regime transitions are handled the same way
+    as `next_weekly_expiry`: each candidate's weekday requirement is
+    resolved using the regime active on that specific candidate date.
+    """
+    holidays = holidays or HolidayCalendar()
+    year, month = from_date.year, from_date.month
+    for _ in range(13):
+        candidate = _last_weekday_match_in_month(year, month)
+        adjusted = holidays.previous_trading_day(candidate)
+        ok = adjusted >= from_date if inclusive else adjusted > from_date
+        if ok:
+            return adjusted
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    raise UnsupportedDateError(f"Could not find a monthly expiry after {from_date}")
