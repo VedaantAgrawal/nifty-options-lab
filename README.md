@@ -14,8 +14,12 @@ Early stage. In place so far:
 - `engine/position_builder.py` — computes strikes and looks up entry
   premiums for a strategy config on a given date, with nearest-strike
   fallback for illiquid/missing strikes.
+- `engine/simulator.py` — runs one full trade cycle: opens a position
+  (via `position_builder`), walks it forward day by day marking it to
+  market, exits on a stop-loss or at expiry, and returns a closed `Trade`
+  (or `None`, logged, if required margin exceeds capital).
 
-No trade execution, exit logic, P&L calculation, or UI yet.
+No parameter sweeps, portfolio-level aggregation, metrics, or UI yet.
 
 ## Layout
 
