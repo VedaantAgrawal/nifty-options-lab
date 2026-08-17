@@ -11,6 +11,9 @@ env/
 # Cached market data (regenerated locally via bhavcopy_loader.py)
 data/cache/*.parquet
 
+# Generated validation-run output
+scripts/output/
+
 # Editor / OS
 .vscode/
 .idea/
