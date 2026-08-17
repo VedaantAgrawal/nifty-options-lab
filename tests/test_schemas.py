@@ -9,7 +9,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from models.schemas import OptionLeg, ParameterGrid, StrategyConfig, Trade
+from models.schemas import OptionLeg, ParameterGrid, StrategyConfig, SweepResult, Trade
 
 
 def make_leg(**overrides):
@@ -252,3 +252,51 @@ class TestParameterGrid:
     def test_empty_list_raises(self):
         with pytest.raises(ValidationError):
             make_grid(structure=[])
+
+
+def make_sweep_result(**overrides):
+    defaults = dict(
+        config=make_config(),
+        total_return=0.15,
+        win_rate=0.6,
+        max_drawdown=-0.08,
+        sharpe=1.2,
+        avg_pnl_per_trade=1500.0,
+        num_trades=40,
+    )
+    defaults.update(overrides)
+    return SweepResult(**defaults)
+
+
+class TestSweepResult:
+    def test_valid_sweep_result_constructs(self):
+        result = make_sweep_result()
+        assert result.config.structure == "short_strangle"
+        assert result.num_trades == 40
+
+    def test_win_rate_above_one_raises(self):
+        with pytest.raises(ValidationError):
+            make_sweep_result(win_rate=1.5)
+
+    def test_win_rate_below_zero_raises(self):
+        with pytest.raises(ValidationError):
+            make_sweep_result(win_rate=-0.1)
+
+    def test_win_rate_boundary_values_are_valid(self):
+        assert make_sweep_result(win_rate=0.0).win_rate == 0.0
+        assert make_sweep_result(win_rate=1.0).win_rate == 1.0
+
+    def test_positive_max_drawdown_raises(self):
+        with pytest.raises(ValidationError):
+            make_sweep_result(max_drawdown=0.05)
+
+    def test_zero_max_drawdown_is_valid(self):
+        assert make_sweep_result(max_drawdown=0.0).max_drawdown == 0.0
+
+    def test_num_trades_negative_raises(self):
+        with pytest.raises(ValidationError):
+            make_sweep_result(num_trades=-1)
+
+    def test_config_must_be_a_valid_strategy_config(self):
+        with pytest.raises(ValidationError):
+            make_sweep_result(config={"structure": "iron_condor"})  # missing required fields
