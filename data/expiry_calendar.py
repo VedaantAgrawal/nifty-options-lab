@@ -106,3 +106,28 @@ class HolidayCalendar:
         while not self.is_trading_day(cur):
             cur -= timedelta(days=1)
         return cur
+
+
+def next_weekly_expiry(
+    from_date: date,
+    holidays: Optional[HolidayCalendar] = None,
+    inclusive: bool = True,
+) -> date:
+    """Return the next NIFTY weekly expiry date on/after `from_date`.
+
+    Regime and holiday shifts are both resolved per-candidate-date, so this
+    is correct across regime transitions (e.g. asking from a date whose own
+    regime says Thursday, when the very next Thursday has already rolled
+    into a Tuesday-expiry regime) and across holiday shifts that would
+    otherwise land the adjusted date before `from_date`.
+    """
+    holidays = holidays or HolidayCalendar()
+    d = from_date if inclusive else from_date + timedelta(days=1)
+    for _ in range(20):
+        if d.weekday() == weekday_for_date(d):
+            adjusted = holidays.previous_trading_day(d)
+            ok = adjusted >= from_date if inclusive else adjusted > from_date
+            if ok:
+                return adjusted
+        d += timedelta(days=1)
+    raise UnsupportedDateError(f"Could not find a weekly expiry within 20 days of {from_date}")
