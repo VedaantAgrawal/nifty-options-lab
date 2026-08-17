@@ -39,6 +39,13 @@ OUTPUT_CSV = Path(__file__).resolve().parent / "output" / "validate_sample_trade
 # after a stop-loss, wait for the next scheduled cycle. None of this was
 # specified by the task beyond structure/expiry_cycle/OTM/stop_loss/capital
 # -- adjust here if you want a different cadence for this validation run.
+#
+# capital=1,000,000: the user's actual available capital. Note that
+# capital=100,000 (the number originally given in the task prompt) skips
+# every single cycle in this window -- at current NIFTY levels (~24,700)
+# with lot_size=65, the placeholder 15%-of-notional margin formula in
+# engine/simulator.py computes ~Rs 4.6-4.8 lakh required per short strangle
+# lot, so 100,000 capital can never open one.
 CONFIG = StrategyConfig(
     structure="short_strangle",
     expiry_cycle="weekly",
@@ -47,7 +54,7 @@ CONFIG = StrategyConfig(
     otm_points_call=500,
     otm_points_put=500,
     stop_loss_pct=100,
-    capital=100_000,
+    capital=1_000_000,
     reentry="next_cycle",
 )
 
@@ -216,7 +223,11 @@ def main() -> None:
             writer.writerow(_trade_to_row(trade))
 
     missing_strike_warnings = [r for r in warning_handler.records if "not found in chain" in r]
-    other_warnings = [r for r in warning_handler.records if r not in missing_strike_warnings]
+    margin_skip_log_lines = [r for r in warning_handler.records if "skipped: required margin" in r]
+    other_warnings = [
+        r for r in warning_handler.records
+        if r not in missing_strike_warnings and r not in margin_skip_log_lines
+    ]
 
     print("\n" + "=" * 70)
     print("SUMMARY")
