@@ -182,3 +182,15 @@ class ParameterGrid(BaseModel):
             if amount <= 0:
                 raise ValueError(f"capital values must be positive, got {amount}")
         return v
+
+
+class SweepResult(BaseModel):
+    """Aggregate backtest performance for a single `StrategyConfig` from a sweep run."""
+
+    config: StrategyConfig
+    total_return: float = Field(description="Total return over the backtest period, as a fraction of capital")
+    win_rate: float = Field(ge=0, le=1, description="Fraction of trades that were profitable")
+    max_drawdown: float = Field(le=0, description="Peak-to-trough decline as a non-positive fraction of capital")
+    sharpe: float
+    avg_pnl_per_trade: float
+    num_trades: int = Field(ge=0)
