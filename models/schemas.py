@@ -222,3 +222,37 @@ class SweepResult(BaseModel):
     sharpe: float
     avg_pnl_per_trade: float
     num_trades: int = Field(ge=0)
+
+    # Anti-overfitting diagnostics (see engine/robustness.py). Optional since
+    # they're only populated once a sweep has been run through
+    # compute_sweep_dsr/analyze_sweep_robustness -- a plain single-backtest
+    # SweepResult has no meaningful "sweep" to deflate against.
+    sharpe_lo_adjusted: Optional[float] = Field(
+        default=None,
+        description="Lo (2002) autocorrelation-adjusted annualized Sharpe, correcting for "
+        "inflation from overlapping/immediately-reentered positions",
+    )
+    skew: Optional[float] = Field(
+        default=None, description="Bias-corrected sample skew of per-cycle trade returns"
+    )
+    kurtosis: Optional[float] = Field(
+        default=None,
+        description="Bias-corrected sample kurtosis (NOT excess) of per-cycle trade returns",
+    )
+    dsr: Optional[float] = Field(
+        default=None,
+        ge=0, le=1,
+        description="Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014): probability the "
+        "true Sharpe exceeds the benchmark expected from n_eff_trials independent searches",
+    )
+    n_eff_trials: Optional[int] = Field(
+        default=None,
+        ge=2,
+        description="Effective number of independent trials across the whole sweep "
+        "(engine.robustness.effective_n_trials, floored at 2) -- the same value on every "
+        "row of a sweep",
+    )
+    robustness_flag: Optional[Literal["green", "amber", "red"]] = Field(
+        default=None,
+        description="green: dsr>=0.95, amber: 0.90<=dsr<0.95, red: dsr<0.90",
+    )
