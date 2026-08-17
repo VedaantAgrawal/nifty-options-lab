@@ -136,3 +136,65 @@ def _walk_to_exit(
     # Loop ran to completion without triggering a stop-loss: exit at expiry
     # using the final trading day's prices (the last one visited above).
     return trading_days[-1], "expiry", day_prices
+
+
+def _leg_pnl_per_unit(leg: OptionLeg, exit_price: float) -> float:
+    if leg.side == "sell":
+        return leg.entry_price - exit_price
+    return exit_price - leg.entry_price
+
+
+def run_single_trade(
+    entry_date: date,
+    config: StrategyConfig,
+    spot_price: float,
+    provider: Optional[OptionsChainProvider] = None,
+    chain: Optional[pd.DataFrame] = None,
+    lot_size: int = DEFAULT_LOT_SIZE,
+    margin_pct: float = DEFAULT_MARGIN_PCT,
+) -> Optional[Trade]:
+    """Run one full trade cycle: open at `entry_date`, walk to stop-loss or expiry.
+
+    Returns None (after logging the reason) if the estimated required margin
+    exceeds `config.capital` -- no position is opened in that case, and no
+    Trade is constructed. Otherwise returns a fully closed Trade.
+
+    Pass `chain` directly to price off an already-fetched DataFrame (e.g. in
+    tests) instead of fetching via `provider`.
+    """
+    expiry = _resolve_expiry(entry_date, config)
+
+    if chain is None:
+        provider = provider or NSEBhavcopyProvider()
+        chain = provider.get_options_chain(start=entry_date, end=expiry)
+
+    legs = build_position(entry_date, config, spot_price, chain=chain)
+
+    margin_required = estimate_margin_required(config, legs, lot_size=lot_size, margin_pct=margin_pct)
+    if margin_required > config.capital:
+        logger.warning(
+            "skipped: required margin ₹%.0f exceeds capital ₹%.0f (entry_date=%s, structure=%s)",
+            margin_required, config.capital, entry_date, config.structure,
+        )
+        return None
+
+    exit_date, exit_reason, exit_prices = _walk_to_exit(
+        chain, expiry, legs, entry_date, config.stop_loss_pct
+    )
+
+    closed_legs = []
+    total_pnl = 0.0
+    for leg in legs:
+        exit_price = exit_prices[id(leg)]
+        total_pnl += _leg_pnl_per_unit(leg, exit_price) * lot_size * leg.lots
+        closed_legs.append(leg.model_copy(update={"exit_price": exit_price}))
+
+    return Trade(
+        entry_date=entry_date,
+        expiry_date=expiry,
+        exit_date=exit_date,
+        legs=closed_legs,
+        exit_reason=exit_reason,
+        pnl=total_pnl,
+        capital_at_risk=margin_required,
+    )
