@@ -4,8 +4,10 @@ Data and research tooling for NIFTY50 index options.
 
 ## Status
 
-Early stage — currently building the historical data ingestion layer
-(`data/` package). No UI or strategy logic yet.
+Early stage. The historical data ingestion layer (`data/` package) is in
+place: NSE bhavcopy download + caching, an expiry-date calendar covering
+NIFTY's historical expiry-day regime changes, and a swappable
+`OptionsChainProvider` interface. No UI or strategy logic yet.
 
 ## Layout
 

@@ -41,3 +41,19 @@ from data.providers import NSEBhavcopyProvider
 provider = NSEBhavcopyProvider()
 df = provider.get_options_chain(start=date(2021, 1, 1), end=date(2021, 1, 31))
 ```
+
+Or via CLI:
+
+```
+python -m data.bhavcopy_loader --start 2021-01-01 --end 2021-12-31
+```
+
+## TODO
+
+- `tests/test_expiry_calendar.py::KNOWN_EXPIRIES` is currently empty. Fill
+  in at least one real, NSE-verified (query_date, expected_weekly_expiry,
+  expected_monthly_expiry) tuple per regime to turn on
+  `test_known_expiry_matches_real_nse_data` (it's skipped until then).
+- `data/holidays/nse_trading_holidays.csv` ships with a header only.
+  Populate it with the official NSE trading holiday list before relying on
+  holiday-shifted expiry dates in `expiry_calendar`.
