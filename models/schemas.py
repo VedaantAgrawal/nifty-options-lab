@@ -37,3 +37,27 @@ class OptionLeg(BaseModel):
         if v <= 0 or not _is_multiple_of(v, STRIKE_INTERVAL):
             raise ValueError(f"strike must be a positive multiple of {STRIKE_INTERVAL}, got {v}")
         return v
+
+
+class Trade(BaseModel):
+    """A complete multi-leg trade, from entry to exit."""
+
+    entry_date: date
+    expiry_date: date
+    exit_date: date
+    legs: List[OptionLeg] = Field(min_length=1, description="At least one leg")
+    exit_reason: Literal["stop_loss", "expiry"]
+    pnl: float = Field(description="Realized P&L for the trade, in currency units")
+    capital_at_risk: float = Field(gt=0, description="Capital allocated/blocked for this trade")
+
+    @model_validator(mode="after")
+    def _dates_are_consistent(self) -> "Trade":
+        if self.entry_date > self.expiry_date:
+            raise ValueError("entry_date must be on or before expiry_date")
+        if self.exit_date < self.entry_date:
+            raise ValueError("exit_date must be on or after entry_date")
+        if self.exit_date > self.expiry_date:
+            raise ValueError("exit_date must be on or before expiry_date")
+        if self.exit_reason == "expiry" and self.exit_date != self.expiry_date:
+            raise ValueError("exit_reason='expiry' requires exit_date == expiry_date")
+        return self
