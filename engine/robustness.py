@@ -231,3 +231,127 @@ def effective_n_trials(pnl_matrix: pd.DataFrame) -> int:
         )
 
     return max(int(round(n_eff)), MIN_N_EFF)
+
+
+def _per_period_sharpe_moments(returns: np.ndarray) -> Tuple[float, float, float]:
+    """(sharpe, skew, kurtosis) from one return series, matching the exact
+    convention Bailey & Lopez de Prado's PSR/DSR formulas assume: sharpe
+    uses POPULATION std (ddof=0, not the usual sample ddof=1), skew is
+    bias-corrected, kurtosis is bias-corrected and NOT excess (no -3).
+    Cross-checked numerically against purgedcv's internal `_sharpe_moments`
+    during development -- matches to floating-point precision.
+    """
+    mean = float(returns.mean())
+    std = float(returns.std(ddof=0))
+    sharpe = mean / std if std > 0 else 0.0
+    sk = float(_scipy_skew(returns, bias=False))
+    ku = float(_scipy_kurtosis(returns, bias=False, fisher=False))
+    return sharpe, sk, ku
+
+
+def deflated_sharpe_ratio(
+    sharpe: float,
+    T: int,
+    skew: float,
+    kurtosis: float,
+    sharpe_variance_across_sweep: float,
+    n_eff: int,
+) -> float:
+    """Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014): the probability
+    the true Sharpe exceeds the benchmark expected from n_eff independent
+    trials under the null of no skill.
+
+    IMPORTANT (per the caller's contract, not enforced here since this
+    function only sees scalars): `sharpe`, `skew`, and `kurtosis` must all
+    come from the SAME per-period, non-annualized trade-level return
+    series -- see _per_period_sharpe_moments / compute_sweep_dsr. Mixing
+    an annualized Sharpe with per-period moments silently produces a
+    meaningless result.
+
+    SR0 (the deflated benchmark) = sqrt(sharpe_variance_across_sweep) *
+    [(1-gamma)*Phi^-1(1-1/n_eff) + gamma*Phi^-1(1-1/(n_eff*e))],
+    gamma = EULER_MASCHERONI.
+
+    DSR = Phi[ (sharpe - SR0)*sqrt(T-1) / sqrt(1 - skew*sharpe +
+    ((kurtosis-1)/4)*sharpe^2) ]   (the PSR formula, evaluated at SR0).
+    """
+    n_eff = max(int(n_eff), MIN_N_EFF)  # defensive floor even if effective_n_trials wasn't the source
+    sr0 = math.sqrt(max(sharpe_variance_across_sweep, 0.0)) * (
+        (1 - EULER_MASCHERONI) * norm.ppf(1 - 1 / n_eff)
+        + EULER_MASCHERONI * norm.ppf(1 - 1 / (n_eff * math.e))
+    )
+    denom = math.sqrt(max(1 - skew * sharpe + ((kurtosis - 1) / 4) * sharpe ** 2, 1e-12))
+    z = (sharpe - sr0) * math.sqrt(max(T - 1, 0)) / denom
+    return float(norm.cdf(z))
+
+
+def _robustness_flag_for_dsr(dsr: float) -> str:
+    if dsr >= 0.95:
+        return "green"
+    if dsr >= 0.90:
+        return "amber"
+    return "red"
+
+
+def compute_sweep_dsr(
+    sweep_df: pd.DataFrame,
+    pnl_matrix: pd.DataFrame,
+    lo_max_lag: int = 5,
+    lo_periods_per_year: float = DEFAULT_PERIODS_PER_YEAR,
+) -> pd.DataFrame:
+    """Run Part A (per-config moments) + Part B (n_eff) + Part C (DSR) across
+    a full sweep.
+
+    `sweep_df`: one row per config, with a "trades" column (list[Trade]).
+    `pnl_matrix`: (T periods x N configs) aligned per-cycle PnL across the
+    WHOLE sweep, used once for effective_n_trials (Part B); its columns
+    should be labeled to match `sweep_df.index`.
+
+    Returns a copy of `sweep_df` with columns added: sharpe (per-period,
+    non-annualized), sharpe_lo_adjusted, skew, kurtosis, dsr, n_eff_trials,
+    robustness_flag. A config with fewer than 2 realized trades gets zeros
+    and robustness_flag="red" (not enough data to say anything).
+    """
+    n_eff = effective_n_trials(pnl_matrix)
+
+    rows = []
+    for _, row in sweep_df.iterrows():
+        trades = row["trades"]
+        returns = trade_level_returns(trades)
+        if len(returns) < 2:
+            rows.append(
+                {"sharpe": 0.0, "sharpe_lo_adjusted": 0.0, "skew": 0.0, "kurtosis": 0.0, "T": len(returns)}
+            )
+            continue
+        sharpe, sk, ku = _per_period_sharpe_moments(returns)
+        lo_sharpe = lo_adjusted_sharpe(returns, max_lag=lo_max_lag, periods_per_year=lo_periods_per_year)
+        rows.append({"sharpe": sharpe, "sharpe_lo_adjusted": lo_sharpe, "skew": sk, "kurtosis": ku, "T": len(returns)})
+
+    per_config = pd.DataFrame(rows, index=sweep_df.index)
+
+    finite_sharpes = per_config.loc[per_config["T"] >= 2, "sharpe"]
+    sharpe_variance_across_sweep = float(finite_sharpes.var(ddof=1)) if len(finite_sharpes) >= 2 else 0.0
+
+    dsr_values = []
+    for _, row in per_config.iterrows():
+        if row["T"] < 2:
+            dsr_values.append(0.0)
+            continue
+        dsr_values.append(
+            deflated_sharpe_ratio(
+                sharpe=row["sharpe"],
+                T=int(row["T"]),
+                skew=row["skew"],
+                kurtosis=row["kurtosis"],
+                sharpe_variance_across_sweep=sharpe_variance_across_sweep,
+                n_eff=n_eff,
+            )
+        )
+    per_config["dsr"] = dsr_values
+    per_config["n_eff_trials"] = n_eff
+    per_config["robustness_flag"] = per_config["dsr"].apply(_robustness_flag_for_dsr)
+
+    result = sweep_df.copy()
+    for col in ["sharpe", "sharpe_lo_adjusted", "skew", "kurtosis", "dsr", "n_eff_trials", "robustness_flag"]:
+        result[col] = per_config[col].values
+    return result
