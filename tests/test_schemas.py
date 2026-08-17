@@ -9,7 +9,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from models.schemas import OptionLeg, Trade
+from models.schemas import OptionLeg, ParameterGrid, StrategyConfig, Trade
 
 
 def make_leg(**overrides):
@@ -124,3 +124,131 @@ class TestTrade:
     def test_capital_at_risk_must_be_positive(self):
         with pytest.raises(ValidationError):
             make_trade(capital_at_risk=0)
+
+
+def make_config(**overrides):
+    defaults = dict(
+        structure="short_strangle",
+        expiry_cycle="weekly",
+        entry_day_of_week=1,
+        days_to_expiry_at_entry=2,
+        otm_points_call=200,
+        otm_points_put=200,
+        stop_loss_pct=30,
+        capital=100_000,
+        reentry="none",
+    )
+    defaults.update(overrides)
+    return StrategyConfig(**defaults)
+
+
+class TestStrategyConfig:
+    def test_valid_short_strangle_constructs_with_no_wing(self):
+        config = make_config()
+        assert config.wing_width_points is None
+
+    def test_valid_iron_condor_requires_wing_width(self):
+        config = make_config(structure="iron_condor", wing_width_points=100)
+        assert config.wing_width_points == 100
+
+    def test_iron_condor_without_wing_width_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(structure="iron_condor")
+
+    def test_short_strangle_with_wing_width_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(structure="short_strangle", wing_width_points=100)
+
+    def test_wing_width_not_multiple_of_50_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(structure="iron_condor", wing_width_points=75)
+
+    def test_otm_points_not_multiple_of_50_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(otm_points_call=175)
+
+    def test_otm_points_negative_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(otm_points_put=-100)
+
+    def test_stop_loss_pct_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            make_config(stop_loss_pct=0)
+
+    def test_stop_loss_pct_negative_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(stop_loss_pct=-10)
+
+    def test_capital_must_be_positive(self):
+        with pytest.raises(ValidationError):
+            make_config(capital=0)
+
+    def test_entry_day_of_week_out_of_range_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(entry_day_of_week=7)
+
+    def test_days_to_expiry_negative_raises(self):
+        with pytest.raises(ValidationError):
+            make_config(days_to_expiry_at_entry=-1)
+
+
+def make_grid(**overrides):
+    defaults = dict(
+        structure=["short_strangle", "iron_condor"],
+        expiry_cycle=["weekly"],
+        entry_day_of_week=[1, 3],
+        days_to_expiry_at_entry=[2, 5],
+        otm_points_call=[150, 200],
+        otm_points_put=[150, 200],
+        wing_width_points=[None, 100],
+        stop_loss_pct=[25, 30],
+        capital=[100_000],
+        reentry=["none", "immediate"],
+    )
+    defaults.update(overrides)
+    return ParameterGrid(**defaults)
+
+
+class TestParameterGrid:
+    def test_valid_grid_constructs(self):
+        grid = make_grid()
+        assert grid.structure == ["short_strangle", "iron_condor"]
+
+    def test_wing_width_defaults_to_none_only_when_omitted(self):
+        # default_factory should kick in when the field is omitted entirely
+        grid = ParameterGrid(
+            structure=["short_strangle"],
+            expiry_cycle=["weekly"],
+            entry_day_of_week=[1],
+            days_to_expiry_at_entry=[2],
+            otm_points_call=[150],
+            otm_points_put=[150],
+            stop_loss_pct=[25],
+            capital=[100_000],
+            reentry=["none"],
+        )
+        assert grid.wing_width_points == [None]
+
+    def test_otm_points_list_with_bad_multiple_raises(self):
+        with pytest.raises(ValidationError):
+            make_grid(otm_points_call=[150, 175])
+
+    def test_wing_width_list_with_bad_multiple_raises(self):
+        with pytest.raises(ValidationError):
+            make_grid(wing_width_points=[None, 90])
+
+    def test_stop_loss_list_with_non_positive_raises(self):
+        with pytest.raises(ValidationError):
+            make_grid(stop_loss_pct=[25, 0])
+
+    def test_capital_list_with_non_positive_raises(self):
+        with pytest.raises(ValidationError):
+            make_grid(capital=[100_000, -5])
+
+    def test_entry_day_of_week_list_out_of_range_raises(self):
+        with pytest.raises(ValidationError):
+            make_grid(entry_day_of_week=[1, 9])
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValidationError):
+            make_grid(structure=[])
