@@ -13,8 +13,10 @@ from __future__ import annotations
 import io
 import logging
 import zipfile
-from datetime import date
-from typing import List, Optional
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Iterable, List, Optional
 
 import pandas as pd
 import requests
@@ -23,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 NORMALIZED_COLUMNS = ["date", "expiry_date", "strike", "option_type", "close", "oi", "volume"]
 DEFAULT_SYMBOL = "NIFTY"
+DEFAULT_START_DATE = date(2021, 1, 1)
+DEFAULT_CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
 NSE_HOMEPAGE_URL = "https://www.nseindia.com/"
 
@@ -184,3 +188,83 @@ def normalize_bhavcopy(raw_df: pd.DataFrame, d: date, symbol: str = DEFAULT_SYMB
     normalized = normalized.dropna(subset=["strike", "close"])
     normalized = normalized.sort_values(["expiry_date", "strike", "option_type"]).reset_index(drop=True)
     return normalized[NORMALIZED_COLUMNS]
+
+
+def _cache_path(cache_dir: Path, year: int) -> Path:
+    return cache_dir / f"nifty_options_{year}.parquet"
+
+
+def _load_cached_year(cache_dir: Path, year: int) -> pd.DataFrame:
+    path = _cache_path(cache_dir, year)
+    if path.exists():
+        return pd.read_parquet(path)
+    return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+
+
+def _save_cached_year(cache_dir: Path, year: int, df: pd.DataFrame) -> None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(_cache_path(cache_dir, year), index=False)
+
+
+def _weekdays_between(start: date, end: date) -> Iterable[date]:
+    """Mon-Fri dates in [start, end]. Actual holidays are handled by the download
+    returning no file for that date, so we don't need a holiday list here."""
+    d = start
+    while d <= end:
+        if d.weekday() < 5:
+            yield d
+        d += timedelta(days=1)
+
+
+@dataclass
+class BhavcopyLoader:
+    """Downloads (with local parquet caching) normalized NIFTY options chain history."""
+
+    symbol: str = DEFAULT_SYMBOL
+    cache_dir: Path = field(default_factory=lambda: DEFAULT_CACHE_DIR)
+    session: NSESession = field(default_factory=NSESession)
+
+    def load(
+        self,
+        start: date = DEFAULT_START_DATE,
+        end: Optional[date] = None,
+        force_refresh: bool = False,
+    ) -> pd.DataFrame:
+        """Return normalized rows for [start, end] inclusive, downloading only what's missing."""
+        end = end or date.today()
+        frames = []
+        for year in range(start.year, end.year + 1):
+            year_start = max(start, date(year, 1, 1))
+            year_end = min(end, date(year, 12, 31))
+            frames.append(self._load_year(year, year_start, year_end, force_refresh))
+        result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=NORMALIZED_COLUMNS)
+        mask = (result["date"] >= start) & (result["date"] <= end)
+        return result[mask].reset_index(drop=True)
+
+    def _load_year(self, year: int, year_start: date, year_end: date, force_refresh: bool) -> pd.DataFrame:
+        cached = pd.DataFrame(columns=NORMALIZED_COLUMNS) if force_refresh else _load_cached_year(
+            self.cache_dir, year
+        )
+        cached_dates = set(cached["date"]) if not cached.empty else set()
+
+        new_frames = []
+        for d in _weekdays_between(year_start, year_end):
+            if d in cached_dates:
+                continue
+            raw = download_bhavcopy_csv(d, self.session)
+            if raw is None:
+                logger.info("No bhavcopy for %s (holiday or not yet published)", d)
+                continue
+            try:
+                new_frames.append(normalize_bhavcopy(raw, d, self.symbol))
+            except BhavcopyParseError as exc:
+                logger.warning("Skipping %s: %s", d, exc)
+
+        if not new_frames:
+            return cached
+
+        combined = pd.concat([cached, *new_frames], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["date", "expiry_date", "strike", "option_type"])
+        combined = combined.sort_values(["date", "expiry_date", "strike", "option_type"]).reset_index(drop=True)
+        _save_cached_year(self.cache_dir, year, combined)
+        return combined
