@@ -106,20 +106,48 @@ class TestHolidayCalendar:
         hc = HolidayCalendar([thursday, friday])
         assert hc.previous_trading_day(thursday) == date(2024, 1, 3)
 
+    def test_from_csv_loads_the_real_nse_holiday_list(self):
+        hc = HolidayCalendar.from_csv()
+        assert hc.is_holiday(date(2021, 1, 26))  # Republic Day
+        assert not hc.is_holiday(date(2021, 1, 27))
 
-# TODO: replace/extend with real NSE-verified expiry dates, at least one per
-# regime, as supplied by the user. Each tuple is
-# (query_date, expected_weekly_expiry, expected_monthly_expiry, regime_label).
+
+class TestRealHolidayShifts:
+    """Regression tests against real holidays from data/holidays/nse_trading_holidays.csv,
+    each landing exactly on that regime's weekly-expiry weekday."""
+
+    def test_thursday_regime_holiday_shifts_expiry_back(self):
+        # 11 Mar 2021 (Mahashivratri) is a Thursday holiday in the pre-Nov-2024 regime.
+        holidays = HolidayCalendar.from_csv()
+        assert next_weekly_expiry(date(2021, 3, 8), holidays=holidays) == date(2021, 3, 10)
+
+    def test_tuesday_regime_holiday_shifts_expiry_back(self):
+        # 21 Oct 2025 (Diwali Laxmi Pujan) is a Tuesday holiday in the post-2-Sept-2025 regime.
+        holidays = HolidayCalendar.from_csv()
+        assert next_weekly_expiry(date(2025, 10, 20), holidays=holidays) == date(2025, 10, 20)
+
+
+# Real NSE-verified expiry dates, one per regime, supplied by the user.
+# Each tuple is (query_date, expected_weekly_expiry, expected_monthly_expiry).
 KNOWN_EXPIRIES = [
-    # pytest.param(date(2021, 1, 4), date(2021, 1, 7), date(2021, 1, 28), id="pre-consolidation"),
-    # pytest.param(date(2024, 12, 2), date(2024, 12, 5), date(2024, 12, 26), id="post-consolidation-thursday"),
-    # pytest.param(date(2025, 9, 8), date(2025, 9, 9), date(2025, 9, 30), id="tuesday-regime"),
+    pytest.param(
+        date(2023, 6, 12), date(2023, 6, 15), date(2023, 6, 29), id="pre_nov2024_thursday"
+    ),
+    pytest.param(
+        date(2024, 12, 30), date(2025, 1, 2), date(2025, 1, 30), id="nov2024_to_aug2025_thursday"
+    ),
+    # First expiry of the Tuesday regime. Flagged by the user as worth a
+    # second look against the NSE circular for the Aug/Sep 2025 transition
+    # in case a one-off override applied -- the current expiry_calendar
+    # logic (regime table + holiday CSV) matches this value.
+    pytest.param(
+        date(2025, 8, 29), date(2025, 9, 2), date(2025, 9, 30), id="sept2025_onward_tuesday"
+    ),
 ]
 
 
-@pytest.mark.skipif(not KNOWN_EXPIRIES, reason="Waiting on real NSE-verified dates to fill in KNOWN_EXPIRIES")
-@pytest.mark.parametrize("query_date, expected_weekly, expected_monthly, regime_label", KNOWN_EXPIRIES)
-def test_known_expiry_matches_real_nse_data(query_date, expected_weekly, expected_monthly, regime_label):
+@pytest.mark.parametrize("query_date, expected_weekly, expected_monthly", KNOWN_EXPIRIES)
+def test_known_expiry_matches_real_nse_data(query_date, expected_weekly, expected_monthly):
     holidays = HolidayCalendar.from_csv()
     assert next_weekly_expiry(query_date, holidays=holidays) == expected_weekly
     assert next_monthly_expiry(query_date, holidays=holidays) == expected_monthly
