@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import date
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 #: NIFTY strikes are quoted in multiples of this many points.
 STRIKE_INTERVAL = 50
@@ -60,4 +60,47 @@ class Trade(BaseModel):
             raise ValueError("exit_date must be on or before expiry_date")
         if self.exit_reason == "expiry" and self.exit_date != self.expiry_date:
             raise ValueError("exit_reason='expiry' requires exit_date == expiry_date")
+        return self
+
+
+class StrategyConfig(BaseModel):
+    """Parameters for one options-selling strategy configuration.
+
+    `entry_day_of_week` follows `datetime.date.weekday()` convention
+    (Monday=0 ... Sunday=6), matching `data/expiry_calendar.py`.
+    """
+
+    structure: Literal["short_strangle", "iron_condor"]
+    expiry_cycle: Literal["weekly", "monthly"]
+    entry_day_of_week: int = Field(ge=0, le=6, description="Monday=0 ... Sunday=6")
+    days_to_expiry_at_entry: int = Field(ge=0, description="Days before expiry to enter the trade")
+    otm_points_call: float = Field(description="Call leg strike distance from spot, positive multiple of 50")
+    otm_points_put: float = Field(description="Put leg strike distance from spot, positive multiple of 50")
+    wing_width_points: Optional[float] = Field(
+        default=None, description="Iron condor wing width; must be None for short_strangle"
+    )
+    stop_loss_pct: float = Field(gt=0, description="Stop-loss as a positive percentage of premium/capital")
+    capital: float = Field(gt=0)
+    reentry: Literal["immediate", "next_cycle", "none"]
+
+    @field_validator("otm_points_call", "otm_points_put")
+    @classmethod
+    def _otm_points_are_positive_multiples_of_interval(cls, v: float, info: ValidationInfo) -> float:
+        if v <= 0 or not _is_multiple_of(v, STRIKE_INTERVAL):
+            raise ValueError(f"{info.field_name} must be a positive multiple of {STRIKE_INTERVAL}, got {v}")
+        return v
+
+    @field_validator("wing_width_points")
+    @classmethod
+    def _wing_width_is_positive_multiple_of_interval_if_set(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v <= 0 or not _is_multiple_of(v, STRIKE_INTERVAL)):
+            raise ValueError(f"wing_width_points must be a positive multiple of {STRIKE_INTERVAL}, got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _wing_width_matches_structure(self) -> "StrategyConfig":
+        if self.structure == "iron_condor" and self.wing_width_points is None:
+            raise ValueError("wing_width_points must be set when structure='iron_condor'")
+        if self.structure != "iron_condor" and self.wing_width_points is not None:
+            raise ValueError("wing_width_points must be None unless structure='iron_condor'")
         return self
