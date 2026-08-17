@@ -25,6 +25,14 @@ Early stage. In place so far:
   trade, trade counts, and the equity curve. `num_skipped_insufficient_margin`
   must be tracked and passed in by the caller, since skipped attempts are
   `None`, never `Trade` instances.
+- `engine/robustness.py` — two-tier anti-overfitting safeguard for
+  parameter sweeps: cheap Deflated Sharpe Ratio (DSR, Bailey & Lopez de
+  Prado 2014) computed per config via `compute_sweep_dsr`, and expensive
+  Probability of Backtest Overfitting (PBO) via Combinatorially Symmetric
+  Cross-Validation computed only on the DSR shortlist via `compute_pbo`
+  (delegates CSCV to the `purgedcv` package). `analyze_sweep_robustness`
+  wires both together. Not yet called from anywhere — `engine/sweep.py`
+  doesn't exist yet.
 - `scripts/validate_sample.py` — a real, non-optimized validation run: loads
   the last 3 months of NIFTY data, runs the entry/exit/reentry loop for one
   fixed `short_strangle` config, and writes a plain per-trade CSV plus a
