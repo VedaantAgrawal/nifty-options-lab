@@ -38,3 +38,15 @@ def _resolve_expiry(entry_date: date, config: StrategyConfig, holidays: Optional
     if config.expiry_cycle == "weekly":
         return next_weekly_expiry(entry_date, holidays=holidays)
     return next_monthly_expiry(entry_date, holidays=holidays)
+
+
+def _target_strikes(config: StrategyConfig, spot_price: float) -> dict:
+    """Compute theoretical target strikes for `config`'s legs, before chain availability is checked."""
+    short_call = _round_to_strike_interval(spot_price + config.otm_points_call)
+    short_put = _round_to_strike_interval(spot_price - config.otm_points_put)
+    strikes = {"short_call": short_call, "short_put": short_put}
+    if config.structure == "iron_condor":
+        assert config.wing_width_points is not None  # enforced by StrategyConfig validation
+        strikes["long_call"] = short_call + config.wing_width_points
+        strikes["long_put"] = short_put - config.wing_width_points
+    return strikes
