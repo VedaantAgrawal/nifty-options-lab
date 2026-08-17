@@ -38,6 +38,8 @@ import pandas as pd
 from scipy.stats import kurtosis as _scipy_kurtosis
 from scipy.stats import norm
 from scipy.stats import skew as _scipy_skew
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_samples
 
 from models.schemas import Trade
 
@@ -130,3 +132,102 @@ def lo_adjusted_sharpe(
 
     eta = q / math.sqrt(correction)
     return float(sr1 * eta)
+
+
+#: Floor applied to n_eff so 1/n_eff in the DSR formula never blows up
+#: (n_eff=1 would make norm.ppf(1 - 1/1) = norm.ppf(0) = -inf).
+MIN_N_EFF = 2
+
+#: Ratio beyond which the KMeans cluster count and the participation ratio
+#: are considered to "disagree" (Part B step 5).
+_N_EFF_DISAGREEMENT_RATIO = 2.0
+
+
+def _angular_distance_matrix(corr: np.ndarray) -> np.ndarray:
+    """d_ij = sqrt(0.5*(1 - rho_ij)) -- a valid metric derived from correlation."""
+    dist = np.sqrt(np.clip(0.5 * (1.0 - corr), 0.0, None))
+    np.fill_diagonal(dist, 0.0)
+    return dist
+
+
+def _best_k_by_silhouette_tstat(dist: np.ndarray, n: int) -> "int | None":
+    """KMeans over k=2..n-1 on `dist`'s rows as feature vectors (the standard
+    correlation-clustering trick: points with similar distance profiles to
+    everyone else land close together), scored by silhouette t-stat
+    (mean/std of per-sample silhouette, computed against `dist` as a
+    precomputed distance matrix -- not re-derived Euclidean distance over
+    the row-vectors used for the KMeans fit itself)."""
+    best_k = None
+    best_score = -np.inf
+    for k in range(2, n):
+        labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(dist)
+        if len(set(labels)) < 2:
+            continue
+        sample_scores = silhouette_samples(dist, labels, metric="precomputed")
+        std_s = sample_scores.std(ddof=1) if len(sample_scores) > 1 else 0.0
+        if std_s == 0.0:
+            continue
+        score = sample_scores.mean() / std_s
+        if score > best_score:
+            best_score = score
+            best_k = k
+    return best_k
+
+
+def _participation_ratio(corr: np.ndarray) -> float:
+    """PR = (sum(eigenvalues))^2 / sum(eigenvalues^2) of the correlation matrix."""
+    eigenvalues = np.clip(np.linalg.eigvalsh(corr), 0.0, None)  # guard tiny numerical negatives
+    sum_sq = float(np.sum(eigenvalues ** 2))
+    if sum_sq == 0.0:
+        return float(len(eigenvalues))
+    return float(np.sum(eigenvalues) ** 2) / sum_sq
+
+
+def effective_n_trials(pnl_matrix: pd.DataFrame) -> int:
+    """Estimate the number of genuinely independent configs behind a sweep.
+
+    Primary method: cluster configs by the angular distance between their
+    per-cycle PnL correlations (KMeans, k selected by silhouette t-stat);
+    the resulting cluster count K is n_eff. Highly correlated/near-duplicate
+    configs collapse into few clusters, so K is much smaller than N when a
+    sweep is mostly redundant variations of the same idea.
+
+    Cross-check: the participation ratio PR of the same correlation
+    matrix's eigenvalues (a standard "effective number of factors"
+    diagnostic). If K and PR disagree by more than 2x, the larger (more
+    conservative -- treats more trials as independent, which makes DSR
+    stricter) of the two is used, and a warning is logged.
+
+    Floored at MIN_N_EFF to keep the DSR formula's 1/n_eff term finite.
+    """
+    n = pnl_matrix.shape[1]
+    if n < 3:
+        # Not enough configs to run the k=2..N-1 clustering range at all.
+        return max(n, MIN_N_EFF)
+
+    corr = pnl_matrix.corr().to_numpy()
+    corr = np.nan_to_num(corr, nan=0.0)  # constant-PnL columns -> undefined correlation
+    np.fill_diagonal(corr, 1.0)
+
+    dist = _angular_distance_matrix(corr)
+    best_k = _best_k_by_silhouette_tstat(dist, n)
+    if best_k is None:
+        # Every k in the search range was degenerate (e.g. all-identical
+        # columns collapsing every attempted clustering) -- treat every
+        # config as its own trial rather than guessing.
+        best_k = n
+
+    pr = _participation_ratio(corr)
+    logger.info("effective_n_trials: KMeans K=%d, participation ratio PR=%.2f", best_k, pr)
+
+    n_eff = float(best_k)
+    smaller, larger = sorted([best_k, pr])
+    if smaller > 0 and larger / smaller > _N_EFF_DISAGREEMENT_RATIO:
+        n_eff = larger
+        logger.warning(
+            "effective_n_trials: KMeans K=%d and participation ratio PR=%.2f disagree by "
+            "more than %.0fx; using the larger (more conservative) value %.2f",
+            best_k, pr, _N_EFF_DISAGREEMENT_RATIO, larger,
+        )
+
+    return max(int(round(n_eff)), MIN_N_EFF)
