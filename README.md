@@ -19,15 +19,22 @@ Early stage. In place so far:
   market, exits on a stop-loss or at expiry, and returns a closed `Trade`
   (or `None`, logged, if required margin exceeds capital). Lot size is
   resolved per `entry_date` via `data/lot_size_calendar.py`.
+- `scripts/validate_sample.py` — a real, non-optimized validation run: loads
+  the last 3 months of NIFTY data, runs the entry/exit/reentry loop for one
+  fixed `short_strangle` config, and writes a plain per-trade CSV plus a
+  printed summary of margin-skip and missing-strike events. Run via
+  `python scripts/validate_sample.py`.
 
-No parameter sweeps, portfolio-level aggregation, metrics, or UI yet.
+No parameter sweeps, portfolio-level aggregation, or metrics/UI yet.
 
 ## Layout
 
 - `data/` — options chain data ingestion, caching, and expiry-date logic.
   See [data/README.md](data/README.md) for details.
 - `models/` — Pydantic schemas shared across the backtest engine.
-- `engine/` — backtest engine logic (currently just position construction).
+- `engine/` — backtest engine logic (currently just position construction
+  and single-trade simulation).
+- `scripts/` — standalone runnable scripts (not imported by anything else).
 - `tests/` — unit tests (pytest).
 
 ## Setup
