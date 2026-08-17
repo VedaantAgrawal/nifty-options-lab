@@ -50,3 +50,31 @@ def _target_strikes(config: StrategyConfig, spot_price: float) -> dict:
         strikes["long_call"] = short_call + config.wing_width_points
         strikes["long_put"] = short_put - config.wing_width_points
     return strikes
+
+
+def _nearest_available_strike(target: float, available: List[float]) -> float:
+    """Nearest strike to `target`; ties break toward the lower strike (deterministic)."""
+    return min(available, key=lambda strike: (abs(strike - target), strike))
+
+
+def _lookup_premium(chain: pd.DataFrame, expiry_date: date, target_strike: float, option_type: str) -> tuple[float, float]:
+    """Return (actual_strike_used, close_price) for the leg, substituting the nearest
+    available strike (with a warning) if `target_strike` isn't in that day's chain."""
+    subset = chain[(chain["expiry_date"] == expiry_date) & (chain["option_type"] == option_type)]
+    if subset.empty:
+        raise MissingOptionsChainDataError(
+            f"No {option_type} options chain data for expiry {expiry_date}"
+        )
+
+    exact = subset[subset["strike"] == target_strike]
+    if not exact.empty:
+        return target_strike, float(exact.iloc[0]["close"])
+
+    available_strikes = subset["strike"].unique().tolist()
+    nearest = _nearest_available_strike(target_strike, available_strikes)
+    logger.warning(
+        "Strike %s %s not found in chain for expiry %s; using nearest available strike %s instead",
+        target_strike, option_type, expiry_date, nearest,
+    )
+    price = float(subset[subset["strike"] == nearest].iloc[0]["close"])
+    return nearest, price
