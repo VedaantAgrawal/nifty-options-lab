@@ -38,6 +38,7 @@ import pandas as pd
 from scipy.stats import kurtosis as _scipy_kurtosis
 from scipy.stats import norm
 from scipy.stats import skew as _scipy_skew
+from purgedcv import probability_of_backtest_overfitting as _purgedcv_pbo
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_samples
 
@@ -355,3 +356,41 @@ def compute_sweep_dsr(
     for col in ["sharpe", "sharpe_lo_adjusted", "skew", "kurtosis", "dsr", "n_eff_trials", "robustness_flag"]:
         result[col] = per_config[col].values
     return result
+
+
+def _risk_flag_for_pbo(pbo: float) -> str:
+    if pbo < 0.20:
+        return "green"
+    if pbo <= 0.50:
+        return "amber"
+    return "red"
+
+
+def compute_pbo(pnl_matrix: pd.DataFrame, s_splits: int = 10) -> dict:
+    """Probability of Backtest Overfitting via CSCV (Bailey, Borwein, Lopez de
+    Prado & Zhu), delegating the combinatorics to
+    purgedcv.probability_of_backtest_overfitting -- see the module
+    docstring for why that's a good fit here rather than a mismatched
+    dependency.
+
+    `pnl_matrix`: (T x M) per-cycle PnL, columns = candidate configs.
+    Should be a SMALL shortlist (the top ~20-50 by DSR), not the whole
+    sweep -- CSCV is O(M * C(s_splits, s_splits//2)), and `analyze_sweep_
+    robustness` is what actually restricts it to that shortlist.
+
+    Returns {"pbo", "is_oos_pairs", "prob_oos_negative", "sweep_risk_flag"}.
+    """
+    returns_by_config = pnl_matrix.to_numpy(dtype=float).T  # purgedcv wants (n_configs, n_obs)
+    result = _purgedcv_pbo(returns_by_config, n_splits=s_splits)
+
+    is_oos_pairs: List[Tuple[float, float]] = [
+        (float(is_val), float(oos_val)) for is_val, oos_val in result.is_oos_performance
+    ]
+    prob_oos_negative = float(np.mean(result.is_oos_performance[:, 1] < 0))
+
+    return {
+        "pbo": float(result.pbo),
+        "is_oos_pairs": is_oos_pairs,
+        "prob_oos_negative": prob_oos_negative,
+        "sweep_risk_flag": _risk_flag_for_pbo(float(result.pbo)),
+    }
