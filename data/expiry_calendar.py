@@ -16,12 +16,16 @@ NIFTY's. Do not reuse NIFTY_WEEKLY_EXPIRY_REGIMES for those indices.
 """
 from __future__ import annotations
 
+import csv
 from bisect import bisect_right
 from dataclasses import dataclass
-from datetime import date
-from typing import List
+from datetime import date, timedelta
+from pathlib import Path
+from typing import Iterable, List, Optional
 
 MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY = range(5)
+
+DEFAULT_HOLIDAY_CSV = Path(__file__).resolve().parent / "holidays" / "nse_trading_holidays.csv"
 
 
 @dataclass(frozen=True)
@@ -58,3 +62,47 @@ def weekday_for_date(d: date) -> int:
             f"(earliest modeled regime starts {_REGIME_STARTS[0]})"
         )
     return NIFTY_WEEKLY_EXPIRY_REGIMES[idx].weekday
+
+
+class HolidayCalendar:
+    """Loadable set of NSE trading holidays, used to shift computed expiries.
+
+    Weekends are always treated as non-trading days in addition to whatever
+    dates are loaded here.
+    """
+
+    def __init__(self, holidays: Optional[Iterable[date]] = None):
+        self._holidays = set(holidays or [])
+
+    @classmethod
+    def from_csv(cls, path: Path = DEFAULT_HOLIDAY_CSV) -> "HolidayCalendar":
+        """Load a holiday list from a CSV with a `date` column (ISO format, YYYY-MM-DD).
+
+        Missing file or empty CSV both just produce a calendar with no
+        holidays (weekends still excluded) rather than raising, since the
+        shipped CSV is a stub the user fills in over time.
+        """
+        path = Path(path)
+        if not path.exists():
+            return cls()
+        holidays = []
+        with path.open(newline="") as f:
+            for row in csv.DictReader(f):
+                raw = (row.get("date") or "").strip()
+                if not raw:
+                    continue
+                holidays.append(date.fromisoformat(raw))
+        return cls(holidays)
+
+    def is_holiday(self, d: date) -> bool:
+        return d in self._holidays
+
+    def is_trading_day(self, d: date) -> bool:
+        return d.weekday() < 5 and not self.is_holiday(d)
+
+    def previous_trading_day(self, d: date) -> date:
+        """Return `d` itself if it's a trading day, else the nearest earlier trading day."""
+        cur = d
+        while not self.is_trading_day(cur):
+            cur -= timedelta(days=1)
+        return cur
