@@ -394,3 +394,29 @@ def compute_pbo(pnl_matrix: pd.DataFrame, s_splits: int = 10) -> dict:
         "prob_oos_negative": prob_oos_negative,
         "sweep_risk_flag": _risk_flag_for_pbo(float(result.pbo)),
     }
+
+
+def analyze_sweep_robustness(
+    sweep_df: pd.DataFrame,
+    pnl_matrices: pd.DataFrame,
+    s_splits: int = 10,
+    top_n_for_pbo: int = 30,
+) -> Tuple[pd.DataFrame, dict]:
+    """Top-level entrypoint: cheap DSR on every config (Parts A-C), then
+    expensive PBO/CSCV (Part D) on just the top `top_n_for_pbo` by DSR.
+
+    `sweep_df`: one row per config, with a "trades" column (list[Trade]).
+    `pnl_matrices`: (T x N) aligned per-cycle PnL for the WHOLE sweep;
+    columns must be labeled to match `sweep_df.index` (used both for
+    effective_n_trials over the full sweep, and sliced down to the DSR
+    shortlist's columns for compute_pbo).
+
+    Returns (annotated_df, pbo_result) -- annotated_df is sweep_df with
+    the columns compute_sweep_dsr adds; pbo_result is compute_pbo's dict,
+    computed only over the shortlist.
+    """
+    annotated = compute_sweep_dsr(sweep_df, pnl_matrices)
+    top_ids = annotated.sort_values("dsr", ascending=False).index[:top_n_for_pbo]
+    top_pnl_matrix = pnl_matrices[top_ids]
+    pbo_result = compute_pbo(top_pnl_matrix, s_splits=s_splits)
+    return annotated, pbo_result
