@@ -17,7 +17,8 @@ Early stage. In place so far:
 - `engine/simulator.py` — runs one full trade cycle: opens a position
   (via `position_builder`), walks it forward day by day marking it to
   market, exits on a stop-loss or at expiry, and returns a closed `Trade`
-  (or `None`, logged, if required margin exceeds capital).
+  (or `None`, logged, if required margin exceeds capital). Lot size is
+  resolved per `entry_date` via `data/lot_size_calendar.py`.
 
 No parameter sweeps, portfolio-level aggregation, metrics, or UI yet.
 

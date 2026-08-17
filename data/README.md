@@ -10,6 +10,10 @@ Historical options chain ingestion for NIFTY50 index options.
 - `expiry_calendar.py` — given any date, computes the correct next weekly
   and monthly NIFTY expiry, accounting for NSE's historical expiry-day
   regime changes and trading holidays.
+- `lot_size_calendar.py` — given any date, returns the correct NIFTY lot
+  size (contracts per lot), accounting for NSE's historical lot-size
+  revisions (verified against NSE circulars — see the module docstring for
+  sources and a caveat about the phased Aug-2021 transition).
 - `providers.py` — `OptionsChainProvider` abstract interface plus the
   concrete `NSEBhavcopyProvider`, so downstream code depends on the
   interface rather than a specific data source.
