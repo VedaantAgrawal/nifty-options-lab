@@ -14,6 +14,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
+from data.lot_size_calendar import lot_size_for_date
 from data.providers import NSEBhavcopyProvider, OptionsChainProvider
 from engine.position_builder import MissingOptionsChainDataError, _resolve_expiry, build_position
 from models.schemas import OptionLeg, StrategyConfig, Trade
@@ -24,11 +25,6 @@ logger = logging.getLogger(__name__)
 #: (short_strangle). Purely a placeholder -- not a real SPAN/exposure margin model.
 DEFAULT_MARGIN_PCT = 0.15
 
-#: Placeholder NIFTY lot size (contracts per lot). NSE has revised this multiple
-#: times historically -- verify the correct value for the specific backtest
-#: period before trusting margin/PnL figures derived from it.
-DEFAULT_LOT_SIZE = 75
-
 
 def _short_legs(legs: List[OptionLeg]) -> List[OptionLeg]:
     return [leg for leg in legs if leg.side == "sell"]
@@ -37,7 +33,7 @@ def _short_legs(legs: List[OptionLeg]) -> List[OptionLeg]:
 def estimate_margin_required(
     config: StrategyConfig,
     legs: List[OptionLeg],
-    lot_size: int = DEFAULT_LOT_SIZE,
+    lot_size: int,
     margin_pct: float = DEFAULT_MARGIN_PCT,
 ) -> float:
     """Rough placeholder margin estimate, evaluated at entry (before any price move).
@@ -150,7 +146,7 @@ def run_single_trade(
     spot_price: float,
     provider: Optional[OptionsChainProvider] = None,
     chain: Optional[pd.DataFrame] = None,
-    lot_size: int = DEFAULT_LOT_SIZE,
+    lot_size: Optional[int] = None,
     margin_pct: float = DEFAULT_MARGIN_PCT,
 ) -> Optional[Trade]:
     """Run one full trade cycle: open at `entry_date`, walk to stop-loss or expiry.
@@ -159,10 +155,17 @@ def run_single_trade(
     exceeds `config.capital` -- no position is opened in that case, and no
     Trade is constructed. Otherwise returns a fully closed Trade.
 
+    `lot_size` defaults to the historically-correct NIFTY lot size for
+    `entry_date` (see data/lot_size_calendar.py) and is resolved once at
+    entry -- a contract's lot size doesn't change over its own life, so the
+    same value is used throughout the trade's walk to exit. Pass it
+    explicitly to override (e.g. in tests).
+
     Pass `chain` directly to price off an already-fetched DataFrame (e.g. in
     tests) instead of fetching via `provider`.
     """
     expiry = _resolve_expiry(entry_date, config)
+    resolved_lot_size = lot_size if lot_size is not None else lot_size_for_date(entry_date)
 
     if chain is None:
         provider = provider or NSEBhavcopyProvider()
@@ -170,7 +173,9 @@ def run_single_trade(
 
     legs = build_position(entry_date, config, spot_price, chain=chain)
 
-    margin_required = estimate_margin_required(config, legs, lot_size=lot_size, margin_pct=margin_pct)
+    margin_required = estimate_margin_required(
+        config, legs, lot_size=resolved_lot_size, margin_pct=margin_pct
+    )
     if margin_required > config.capital:
         logger.warning(
             "skipped: required margin ₹%.0f exceeds capital ₹%.0f (entry_date=%s, structure=%s)",
@@ -186,7 +191,7 @@ def run_single_trade(
     total_pnl = 0.0
     for leg in legs:
         exit_price = exit_prices[id(leg)]
-        total_pnl += _leg_pnl_per_unit(leg, exit_price) * lot_size * leg.lots
+        total_pnl += _leg_pnl_per_unit(leg, exit_price) * resolved_lot_size * leg.lots
         closed_legs.append(leg.model_copy(update={"exit_price": exit_price}))
 
     return Trade(
