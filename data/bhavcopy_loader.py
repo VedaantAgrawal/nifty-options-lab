@@ -10,6 +10,7 @@ inspecting the actual column headers.
 """
 from __future__ import annotations
 
+import argparse
 import io
 import logging
 import zipfile
@@ -268,3 +269,29 @@ class BhavcopyLoader:
         combined = combined.sort_values(["date", "expiry_date", "strike", "option_type"]).reset_index(drop=True)
         _save_cached_year(self.cache_dir, year, combined)
         return combined
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Download and cache NSE F&O bhavcopy data.")
+    parser.add_argument("--symbol", default=DEFAULT_SYMBOL, help="Index symbol (default: NIFTY)")
+    parser.add_argument(
+        "--start", default=DEFAULT_START_DATE.isoformat(), help="Start date, YYYY-MM-DD (default: 2021-01-01)"
+    )
+    parser.add_argument("--end", default=None, help="End date, YYYY-MM-DD (default: today)")
+    parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR), help="Parquet cache directory")
+    parser.add_argument("--force-refresh", action="store_true", help="Re-download even if cached")
+    return parser.parse_args()
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    args = _parse_args()
+    loader = BhavcopyLoader(symbol=args.symbol, cache_dir=Path(args.cache_dir))
+    start = date.fromisoformat(args.start)
+    end = date.fromisoformat(args.end) if args.end else None
+    df = loader.load(start=start, end=end, force_refresh=args.force_refresh)
+    logger.info("Loaded %d rows for %s from %s to %s", len(df), args.symbol, start, end or date.today())
+
+
+if __name__ == "__main__":
+    main()
