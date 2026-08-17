@@ -9,6 +9,7 @@ from datetime import date
 import pandas as pd
 import pytest
 
+from data.lot_size_calendar import lot_size_for_date
 from engine.position_builder import MissingOptionsChainDataError
 from engine.simulator import run_single_trade
 from models.schemas import StrategyConfig
@@ -166,13 +167,14 @@ class TestIronCondorSimulation:
         assert trade.exit_reason == "expiry"
 
     def test_iron_condor_margin_is_wing_width_based_not_notional_pct(self):
-        # wing_width_points=150, lot_size default 75 -> margin ~ 150*75 = 11250,
-        # far less than a short_strangle's notional-based margin would be.
+        # wing_width_points=150; ENTRY_DATE (2022-03-01) resolves to lot_size=50
+        # via lot_size_calendar -> margin ~ 150*50 = 7500, far less than a
+        # short_strangle's notional-based margin would be.
         chain = make_chain({})
         cheap_capital_config = make_iron_condor_config(capital=15_000)
         trade = run_single_trade(ENTRY_DATE, cheap_capital_config, SPOT, chain=chain)
         assert trade is not None
-        assert trade.capital_at_risk == pytest.approx(150 * 75)
+        assert trade.capital_at_risk == pytest.approx(150 * 50)
 
 
 class TestInsufficientMargin:
@@ -195,6 +197,27 @@ class TestInsufficientMargin:
         rich_config = make_strangle_config(capital=10_000_000)
         result = run_single_trade(ENTRY_DATE, rich_config, SPOT, chain=chain)
         assert result is not None
+
+
+class TestLotSizeCalendarIntegration:
+    def test_margin_uses_lot_size_calendar_default_for_entry_date(self):
+        # ENTRY_DATE=2022-03-01 falls in the Aug-2021-to-Apr-2024 regime (lot 50),
+        # not any hardcoded constant -- assert against the calendar itself so
+        # this stays correct if the regime table is ever revised.
+        chain = make_chain({})
+        config = make_strangle_config(capital=10_000_000)
+        trade = run_single_trade(ENTRY_DATE, config, SPOT, chain=chain)
+        expected_lot_size = lot_size_for_date(ENTRY_DATE)
+        assert expected_lot_size == 50  # sanity: this test only makes sense pre-Apr-2024
+        expected_margin = (24900.0 + 24500.0) * expected_lot_size * 0.15
+        assert trade.capital_at_risk == pytest.approx(expected_margin)
+
+    def test_explicit_lot_size_overrides_the_calendar_default(self):
+        chain = make_chain({})
+        config = make_strangle_config(capital=10_000_000)
+        trade = run_single_trade(ENTRY_DATE, config, SPOT, chain=chain, lot_size=999)
+        expected_margin = (24900.0 + 24500.0) * 999 * 0.15
+        assert trade.capital_at_risk == pytest.approx(expected_margin)
 
 
 class TestMissingChainData:
