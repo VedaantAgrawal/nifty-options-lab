@@ -111,7 +111,11 @@ def lo_adjusted_sharpe(
     """
     returns = np.asarray(returns, dtype=float)
     n = len(returns)
-    if n < 2:
+    # A constant series should have an undefined/zero Sharpe, but bit-identical
+    # values can leave std() at a tiny nonzero residual (~1e-18) instead of a
+    # clean 0.0 -- test the value range rather than the computed std (same
+    # guard purgedcv's sharpe() metric uses).
+    if n < 2 or float(np.ptp(returns)) == 0.0:
         return 0.0
     std = returns.std(ddof=1)
     if std == 0.0 or not np.isfinite(std):
@@ -243,6 +247,10 @@ def _per_period_sharpe_moments(returns: np.ndarray) -> Tuple[float, float, float
     during development -- matches to floating-point precision.
     """
     mean = float(returns.mean())
+    # Same bit-identical-values guard as lo_adjusted_sharpe: a constant
+    # series' std() can land on a tiny nonzero residual instead of 0.0.
+    if float(np.ptp(returns)) == 0.0:
+        return 0.0, 0.0, 0.0
     std = float(returns.std(ddof=0))
     sharpe = mean / std if std > 0 else 0.0
     sk = float(_scipy_skew(returns, bias=False))
