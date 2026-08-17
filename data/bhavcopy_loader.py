@@ -264,7 +264,11 @@ class BhavcopyLoader:
         if not new_frames:
             return cached
 
-        combined = pd.concat([cached, *new_frames], ignore_index=True)
+        # Skip an empty `cached` placeholder in the concat -- its columns are
+        # object-dtype (no rows to infer a numeric dtype from), and including
+        # it would upcast otherwise-numeric columns like `strike` to object.
+        frames_to_combine = ([cached] if not cached.empty else []) + new_frames
+        combined = pd.concat(frames_to_combine, ignore_index=True)
         combined = combined.drop_duplicates(subset=["date", "expiry_date", "strike", "option_type"])
         combined = combined.sort_values(["date", "expiry_date", "strike", "option_type"]).reset_index(drop=True)
         _save_cached_year(self.cache_dir, year, combined)
