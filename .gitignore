@@ -19,3 +19,6 @@ Thumbs.db
 
 # Env / secrets
 .env
+
+# Personal notes, not for the repo
+claude_code_prompts.md
