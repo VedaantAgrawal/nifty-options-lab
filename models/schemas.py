@@ -48,13 +48,27 @@ class OptionLeg(BaseModel):
 
 
 class Trade(BaseModel):
-    """A complete multi-leg trade, from entry to exit."""
+    """A trade that was actually opened and has since fully closed.
+
+    Every leg must have both `entry_price` and `exit_price` populated
+    (`entry_price` is already guaranteed non-None by `OptionLeg` itself;
+    `exit_price` is checked below since `OptionLeg` allows it to be unset
+    for legs that haven't closed yet).
+
+    A trade attempt that never opened -- e.g. skipped because required
+    margin exceeded available capital -- has no entry, no exit, and no
+    `exit_reason` to report, so it must never be represented as a `Trade`
+    instance (not even with sentinel/zero values). Whatever code decides
+    whether to open a position should return `None` for that case instead.
+    """
 
     entry_date: date
     expiry_date: date
     exit_date: date
     legs: List[OptionLeg] = Field(min_length=1, description="At least one leg")
-    exit_reason: Literal["stop_loss", "expiry"]
+    exit_reason: Literal["stop_loss", "expiry"] = Field(
+        description="How this opened trade closed. Never used to represent a trade that never opened."
+    )
     pnl: float = Field(description="Realized P&L for the trade, in currency units")
     capital_at_risk: float = Field(gt=0, description="Capital allocated/blocked for this trade")
 
