@@ -104,3 +104,81 @@ class StrategyConfig(BaseModel):
         if self.structure != "iron_condor" and self.wing_width_points is not None:
             raise ValueError("wing_width_points must be None unless structure='iron_condor'")
         return self
+
+
+class ParameterGrid(BaseModel):
+    """Same fields as `StrategyConfig`, each a list of candidate values.
+
+    The engine (not built yet) is expected to take the Cartesian product of
+    all fields to produce individual `StrategyConfig` instances -- so
+    cross-field checks like the iron_condor/wing_width_points relationship
+    are validated per-generated-combo by `StrategyConfig` itself, not here.
+    This schema only validates that each dimension's own values are
+    individually well-formed.
+    """
+
+    structure: List[Literal["short_strangle", "iron_condor"]] = Field(min_length=1)
+    expiry_cycle: List[Literal["weekly", "monthly"]] = Field(min_length=1)
+    entry_day_of_week: List[int] = Field(min_length=1)
+    days_to_expiry_at_entry: List[int] = Field(min_length=1)
+    otm_points_call: List[float] = Field(min_length=1)
+    otm_points_put: List[float] = Field(min_length=1)
+    wing_width_points: List[Optional[float]] = Field(
+        default_factory=lambda: [None],
+        description="Candidate wing widths; include None for combos where structure != iron_condor",
+    )
+    stop_loss_pct: List[float] = Field(min_length=1)
+    capital: List[float] = Field(min_length=1)
+    reentry: List[Literal["immediate", "next_cycle", "none"]] = Field(min_length=1)
+
+    @field_validator("entry_day_of_week")
+    @classmethod
+    def _entry_day_of_week_values_in_range(cls, v: List[int]) -> List[int]:
+        for day in v:
+            if not (0 <= day <= 6):
+                raise ValueError(f"entry_day_of_week values must be 0-6 (Monday=0), got {day}")
+        return v
+
+    @field_validator("days_to_expiry_at_entry")
+    @classmethod
+    def _days_to_expiry_values_non_negative(cls, v: List[int]) -> List[int]:
+        for days in v:
+            if days < 0:
+                raise ValueError(f"days_to_expiry_at_entry values must be >= 0, got {days}")
+        return v
+
+    @field_validator("otm_points_call", "otm_points_put")
+    @classmethod
+    def _otm_points_values_are_positive_multiples_of_interval(cls, v: List[float], info: ValidationInfo) -> List[float]:
+        for points in v:
+            if points <= 0 or not _is_multiple_of(points, STRIKE_INTERVAL):
+                raise ValueError(
+                    f"{info.field_name} values must be positive multiples of {STRIKE_INTERVAL}, got {points}"
+                )
+        return v
+
+    @field_validator("wing_width_points")
+    @classmethod
+    def _wing_width_values_are_positive_multiples_of_interval_if_set(
+        cls, v: List[Optional[float]]
+    ) -> List[Optional[float]]:
+        for width in v:
+            if width is not None and (width <= 0 or not _is_multiple_of(width, STRIKE_INTERVAL)):
+                raise ValueError(f"wing_width_points values must be positive multiples of {STRIKE_INTERVAL}, got {width}")
+        return v
+
+    @field_validator("stop_loss_pct")
+    @classmethod
+    def _stop_loss_pct_values_are_positive(cls, v: List[float]) -> List[float]:
+        for pct in v:
+            if pct <= 0:
+                raise ValueError(f"stop_loss_pct values must be positive, got {pct}")
+        return v
+
+    @field_validator("capital")
+    @classmethod
+    def _capital_values_are_positive(cls, v: List[float]) -> List[float]:
+        for amount in v:
+            if amount <= 0:
+                raise ValueError(f"capital values must be positive, got {amount}")
+        return v
