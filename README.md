@@ -19,6 +19,12 @@ Early stage. In place so far:
   market, exits on a stop-loss or at expiry, and returns a closed `Trade`
   (or `None`, logged, if required margin exceeds capital). Lot size is
   resolved per `entry_date` via `data/lot_size_calendar.py`.
+- `engine/metrics.py` — `compute_metrics(trades)` aggregates a list of
+  closed `Trade`s into a `MetricsResult`: total return, win rate, max
+  drawdown, annualized Sharpe (risk-free rate defaults to 0), avg P&L per
+  trade, trade counts, and the equity curve. `num_skipped_insufficient_margin`
+  must be tracked and passed in by the caller, since skipped attempts are
+  `None`, never `Trade` instances.
 - `scripts/validate_sample.py` — a real, non-optimized validation run: loads
   the last 3 months of NIFTY data, runs the entry/exit/reentry loop for one
   fixed `short_strangle` config, and writes a plain per-trade CSV plus a
