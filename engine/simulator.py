@@ -57,3 +57,82 @@ def estimate_margin_required(
 
     short_notional = sum(leg.strike * lot_size * leg.lots for leg in _short_legs(legs))
     return short_notional * margin_pct
+
+
+def _trading_days_in_range(chain: pd.DataFrame, expiry: date, start: date, end: date) -> List[date]:
+    subset = chain[(chain["expiry_date"] == expiry) & (chain["date"] >= start) & (chain["date"] <= end)]
+    return sorted(subset["date"].unique())
+
+
+def _leg_price_on_day(day_chain: pd.DataFrame, expiry: date, leg: OptionLeg) -> Optional[float]:
+    rows = day_chain[
+        (day_chain["expiry_date"] == expiry)
+        & (day_chain["option_type"] == leg.option_type)
+        & (day_chain["strike"] == leg.strike)
+    ]
+    if rows.empty:
+        return None
+    return float(rows.iloc[0]["close"])
+
+
+def _mark_to_market(
+    chain: pd.DataFrame,
+    expiry: date,
+    legs: List[OptionLeg],
+    day: date,
+    last_known_prices: Dict[int, float],
+) -> Dict[int, float]:
+    """Return {id(leg): price} for `day`, carrying forward the last known price
+    (with a warning) for any leg whose exact strike didn't trade that day."""
+    day_chain = chain[chain["date"] == day]
+    prices = {}
+    for leg in legs:
+        price = _leg_price_on_day(day_chain, expiry, leg)
+        if price is None:
+            price = last_known_prices[id(leg)]
+            logger.warning(
+                "No chain data for strike %s %s on %s (expiry %s); carrying forward last known price %.2f",
+                leg.strike, leg.option_type, day, expiry, price,
+            )
+        prices[id(leg)] = price
+    return prices
+
+
+def _walk_to_exit(
+    chain: pd.DataFrame,
+    expiry: date,
+    legs: List[OptionLeg],
+    entry_date: date,
+    stop_loss_pct: float,
+) -> tuple[date, str, Dict[int, float]]:
+    """Walk trading days from entry_date to expiry, returning (exit_date, exit_reason, exit_prices).
+
+    exit_prices maps id(leg) -> close price on the exit day. Stops early with
+    exit_reason='stop_loss' the first day the short legs' combined premium is
+    >= stop_loss_pct percent above what was collected at entry; otherwise
+    exits at expiry using that day's close prices (the day's official
+    close/settlement row -- no separate early-assignment logic is needed
+    since NIFTY index options are European-style and cash-settled).
+    """
+    trading_days = _trading_days_in_range(chain, expiry, entry_date, expiry)
+    if not trading_days:
+        raise MissingOptionsChainDataError(
+            f"No options chain data between {entry_date} and {expiry} for expiry {expiry}"
+        )
+
+    entry_short_premium = sum(leg.entry_price for leg in _short_legs(legs))
+    stop_loss_threshold = entry_short_premium * (1 + stop_loss_pct / 100)
+
+    last_known_prices = {id(leg): leg.entry_price for leg in legs}
+    day_prices = last_known_prices
+    for day in trading_days:
+        day_prices = _mark_to_market(chain, expiry, legs, day, last_known_prices)
+        last_known_prices = day_prices
+
+        short_premium_today = sum(day_prices[id(leg)] for leg in _short_legs(legs))
+        if short_premium_today >= stop_loss_threshold:
+            return day, "stop_loss", day_prices
+
+    # Loop ran to completion without triggering a stop-loss: exit at expiry
+    # using the final trading day's prices (the last one visited above).
+    return trading_days[-1], "expiry", day_prices
