@@ -21,6 +21,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+NORMALIZED_COLUMNS = ["date", "expiry_date", "strike", "option_type", "close", "oi", "volume"]
+DEFAULT_SYMBOL = "NIFTY"
+
 NSE_HOMEPAGE_URL = "https://www.nseindia.com/"
 
 LEGACY_BHAVCOPY_URL_TEMPLATE = (
@@ -123,3 +126,61 @@ def download_bhavcopy_csv(d: date, session: NSESession) -> Optional[pd.DataFrame
     if last_error is not None:
         raise BhavcopyDownloadError(f"All bhavcopy URLs failed for {d}: {last_error}") from last_error
     return None
+
+
+# Columns that uniquely identify each known raw layout. Detection is by
+# column presence rather than a hardcoded cutover date, since NSE's format
+# roll-out was gradual and not documented to the day.
+_LEGACY_MARKER_COLUMNS = {"INSTRUMENT", "SYMBOL", "OPTION_TYP"}
+_UDIFF_MARKER_COLUMNS = {"TckrSymb", "OptnTp", "XpryDt"}
+
+
+def _normalize_legacy(raw_df: pd.DataFrame, d: date, symbol: str) -> pd.DataFrame:
+    rows = raw_df[(raw_df["SYMBOL"] == symbol) & (raw_df["INSTRUMENT"] == "OPTIDX")]
+    return pd.DataFrame(
+        {
+            "date": d,
+            "expiry_date": pd.to_datetime(rows["EXPIRY_DT"], format="%d-%b-%Y").dt.date,
+            "strike": rows["STRIKE_PR"].astype(float),
+            "option_type": rows["OPTION_TYP"],
+            "close": rows["CLOSE"].astype(float),
+            "oi": rows["OPEN_INT"].astype("int64"),
+            "volume": rows["CONTRACTS"].astype("int64"),
+        }
+    )
+
+
+def _normalize_udiff(raw_df: pd.DataFrame, d: date, symbol: str) -> pd.DataFrame:
+    rows = raw_df[(raw_df["TckrSymb"] == symbol) & (raw_df["OptnTp"].isin(["CE", "PE"]))]
+    return pd.DataFrame(
+        {
+            "date": d,
+            "expiry_date": pd.to_datetime(rows["XpryDt"]).dt.date,
+            "strike": rows["StrkPric"].astype(float),
+            "option_type": rows["OptnTp"],
+            "close": rows["ClsPric"].astype(float),
+            "oi": rows["OpnIntrst"].astype("int64"),
+            "volume": rows["TtlTradgVol"].astype("int64"),
+        }
+    )
+
+
+def normalize_bhavcopy(raw_df: pd.DataFrame, d: date, symbol: str = DEFAULT_SYMBOL) -> pd.DataFrame:
+    """Normalize a raw bhavcopy DataFrame (either known layout) into the common schema.
+
+    Filters down to index options for `symbol` only (futures and stock
+    options rows are dropped). Raises BhavcopyParseError if the layout
+    doesn't match any known format.
+    """
+    columns = set(raw_df.columns)
+    if _LEGACY_MARKER_COLUMNS.issubset(columns):
+        normalized = _normalize_legacy(raw_df, d, symbol)
+    elif _UDIFF_MARKER_COLUMNS.issubset(columns):
+        normalized = _normalize_udiff(raw_df, d, symbol)
+    else:
+        raise BhavcopyParseError(
+            f"Unrecognized bhavcopy column layout for {d}: {sorted(columns)[:15]}"
+        )
+    normalized = normalized.dropna(subset=["strike", "close"])
+    normalized = normalized.sort_values(["expiry_date", "strike", "option_type"]).reset_index(drop=True)
+    return normalized[NORMALIZED_COLUMNS]
