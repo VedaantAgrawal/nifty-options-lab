@@ -31,8 +31,17 @@ Early stage. In place so far:
   Probability of Backtest Overfitting (PBO) via Combinatorially Symmetric
   Cross-Validation computed only on the DSR shortlist via `compute_pbo`
   (delegates CSCV to the `purgedcv` package). `analyze_sweep_robustness`
-  wires both together. Not yet called from anywhere — `engine/sweep.py`
-  doesn't exist yet.
+  wires both together. Not yet wired into `engine/sweep.py`.
+- `engine/sweep.py` — `run_sweep(grid, train_range, validation_range)`:
+  expands a `ParameterGrid`'s Cartesian product into `StrategyConfig`s
+  (skipping cross-field-invalid combos), runs each through the same
+  reentry loop as `scripts/validate_sample.py` (`run_trade_cycle_loop`,
+  the canonical shared implementation — the script imports it rather than
+  keeping its own copy) in parallel via `multiprocessing`, ranks by a
+  configurable metric on the train range, and re-runs only the top N on
+  the validation range so in-sample/out-of-sample performance are visible
+  side by side. Returns a flat `pandas.DataFrame`, not `SweepResult`
+  instances (the model doesn't have a natural train-vs-validation shape).
 - `scripts/validate_sample.py` — a real, non-optimized validation run: loads
   the last 3 months of NIFTY data, runs the entry/exit/reentry loop for one
   fixed `short_strangle` config, and writes a plain per-trade CSV plus a
