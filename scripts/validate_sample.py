@@ -16,16 +16,13 @@ import logging
 import sys
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
-
-import pandas as pd
+from typing import Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.expiry_calendar import HolidayCalendar  # noqa: E402
 from data.providers import NSEBhavcopyProvider  # noqa: E402
-from engine.position_builder import _resolve_expiry  # noqa: E402
-from engine.simulator import run_single_trade  # noqa: E402
+from engine.sweep import run_trade_cycle_loop  # noqa: E402
 from models.schemas import StrategyConfig, Trade  # noqa: E402
 
 OUTPUT_CSV = Path(__file__).resolve().parent / "output" / "validate_sample_trades.csv"
@@ -85,59 +82,6 @@ class _CollectingHandler(logging.Handler):
         self.records.append(self.format(record))
 
 
-def _next_occurrence_of_weekday(after: date, weekday: int) -> date:
-    d = after
-    while d.weekday() != weekday:
-        d += timedelta(days=1)
-    return d
-
-
-def _next_trading_day(after: date, holidays: HolidayCalendar) -> date:
-    d = after
-    while not holidays.is_trading_day(d):
-        d += timedelta(days=1)
-    return d
-
-
-def _next_entry_after(after: date, config: StrategyConfig, holidays: HolidayCalendar) -> date:
-    """Next scheduled cycle's entry date strictly after `after` (next occurrence
-    of config.entry_day_of_week, shifted onto a real trading day)."""
-    candidate = _next_occurrence_of_weekday(after + timedelta(days=1), config.entry_day_of_week)
-    return _next_trading_day(candidate, holidays)
-
-
-def _next_entry_after_exit(exit_date: date, config: StrategyConfig, holidays: HolidayCalendar) -> Optional[date]:
-    """Where the next trade cycle should start, per config.reentry. None means stop."""
-    if config.reentry == "none":
-        return None
-    if config.reentry == "immediate":
-        return _next_trading_day(exit_date + timedelta(days=1), holidays)
-    # "next_cycle"
-    return _next_entry_after(exit_date, config, holidays)
-
-
-def _estimate_spot_price(day_chain: pd.DataFrame, expiry: date) -> Optional[float]:
-    """Synthetic spot estimate via put-call parity (S ~= K + call_close - put_close),
-    averaged over the 5 strikes closest to at-the-money.
-
-    Our options chain data (data/bhavcopy_loader.py) carries no direct
-    underlying/spot price column, so this is an estimate, not a recorded
-    value. Good enough for OTM-points strike selection (which rounds to the
-    nearest 50 anyway) -- don't rely on it for anything needing true spot
-    precision.
-    """
-    subset = day_chain[day_chain["expiry_date"] == expiry]
-    calls = subset[subset["option_type"] == "CE"].set_index("strike")["close"]
-    puts = subset[subset["option_type"] == "PE"].set_index("strike")["close"]
-    common_strikes = calls.index.intersection(puts.index)
-    if len(common_strikes) == 0:
-        return None
-    diffs = (calls.loc[common_strikes] - puts.loc[common_strikes]).abs()
-    nearest = diffs.nsmallest(min(5, len(diffs))).index
-    implied_spots = [strike + calls[strike] - puts[strike] for strike in nearest]
-    return float(sum(implied_spots) / len(implied_spots))
-
-
 def _trade_to_row(trade: Trade) -> Dict:
     call = next(leg for leg in trade.legs if leg.option_type == "CE")
     put = next(leg for leg in trade.legs if leg.option_type == "PE")
@@ -177,43 +121,15 @@ def main() -> None:
 
     holidays = HolidayCalendar.from_csv()
 
-    trades: List[Trade] = []
-    margin_skips: List[Dict] = []
+    trades, skipped_entry_dates = run_trade_cycle_loop(CONFIG, start, end, chain, holidays)
+    margin_skips: List[Dict] = [{"entry_date": d} for d in skipped_entry_dates]
 
-    entry_date: Optional[date] = _next_entry_after(start - timedelta(days=1), CONFIG, holidays)
-
-    while entry_date is not None and entry_date <= end:
-        day_chain = chain[chain["date"] == entry_date]
-        if day_chain.empty:
-            print(f"  {entry_date}: no chain data (holiday or gap) -- skipping to next cycle")
-            entry_date = _next_entry_after(entry_date, CONFIG, holidays)
-            continue
-
-        expiry = _resolve_expiry(entry_date, CONFIG, holidays=holidays)
-        if expiry > end:
-            print(f"  {entry_date}: cycle expiry {expiry} is beyond today ({end}) -- stopping (incomplete cycle)")
-            break
-
-        spot_price = _estimate_spot_price(day_chain, expiry)
-        if spot_price is None:
-            print(f"  {entry_date}: could not estimate spot price (no CE/PE overlap) -- skipping to next cycle")
-            entry_date = _next_entry_after(entry_date, CONFIG, holidays)
-            continue
-
-        trade = run_single_trade(entry_date, CONFIG, spot_price, chain=chain)
-
-        if trade is None:
-            print(f"  {entry_date}: SKIPPED (insufficient margin) -- see warning above")
-            margin_skips.append({"entry_date": entry_date})
-            entry_date = _next_entry_after(entry_date, CONFIG, holidays)
-            continue
-
-        trades.append(trade)
-        print(
-            f"  {entry_date} -> {trade.exit_date} ({trade.exit_reason}): "
-            f"pnl={trade.pnl:.2f}"
-        )
-        entry_date = _next_entry_after_exit(trade.exit_date, CONFIG, holidays)
+    # Interleave trade and skip lines chronologically for the printout (they
+    # come back as two separate lists from run_trade_cycle_loop).
+    events = [(t.entry_date, f"{t.entry_date} -> {t.exit_date} ({t.exit_reason}): pnl={t.pnl:.2f}") for t in trades]
+    events += [(d, f"{d}: SKIPPED (insufficient margin) -- see warning above") for d in skipped_entry_dates]
+    for _, line in sorted(events, key=lambda e: e[0]):
+        print(f"  {line}")
 
     OUTPUT_CSV.parent.mkdir(parents=True, exist_ok=True)
     with OUTPUT_CSV.open("w", newline="") as f:
