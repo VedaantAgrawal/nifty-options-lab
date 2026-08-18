@@ -1,0 +1,79 @@
+# NiftyCorridor reverse proxy config.
+#
+# Copy to /etc/nginx/sites-available/niftycorridor and symlink into
+# sites-enabled (or adapt the paths for your distro's nginx layout). See
+# README.md's "Deployment" section for the full step-by-step, including the
+# htpasswd setup this config depends on and the certbot command that will
+# rewrite the HTTPS block below for you.
+
+server {
+    listen 80;
+    server_name niftycorridor.vedaantagrawal.com;
+
+    # --- HTTP Basic Auth ---------------------------------------------------
+    # A minimal access gate, NOT real authentication: one shared password
+    # for everyone, stops casual drive-by access, not a determined person.
+    # If multiple people need distinct logins later, that's separate work.
+    auth_basic "NiftyCorridor";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+
+    location / {
+        proxy_pass http://127.0.0.1:8501;
+
+        # Streamlit needs WebSocket upgrade support for live UI updates
+        # (widget interactions, spinners, etc. go over the same connection).
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # A parameter sweep can run for a while; don't let nginx time out
+        # the (WebSocket-carried) connection out from under it.
+        proxy_read_timeout 86400;
+    }
+}
+
+# --- Certbot / Let's Encrypt HTTPS ------------------------------------------
+# After `sudo certbot --nginx -d niftycorridor.vedaantagrawal.com` (see
+# README.md), certbot rewrites the block above into roughly this, plus an
+# HTTP->HTTPS redirect server block. Left here as a reference for what to
+# expect -- don't hand-copy this in if you're using certbot's nginx plugin,
+# since it manages these directives itself and re-runs on renewal.
+#
+# server {
+#     listen 443 ssl;
+#     server_name niftycorridor.vedaantagrawal.com;
+#
+#     ssl_certificate /etc/letsencrypt/live/niftycorridor.vedaantagrawal.com/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/niftycorridor.vedaantagrawal.com/privkey.pem;
+#     include /etc/letsencrypt/options-ssl-nginx.conf;
+#     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+#
+#     auth_basic "NiftyCorridor";
+#     auth_basic_user_file /etc/nginx/.htpasswd;
+#
+#     location / {
+#         proxy_pass http://127.0.0.1:8501;
+#         proxy_http_version 1.1;
+#         proxy_set_header Upgrade $http_upgrade;
+#         proxy_set_header Connection "upgrade";
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_read_timeout 86400;
+#     }
+# }
+#
+# server {
+#     listen 80;
+#     server_name niftycorridor.vedaantagrawal.com;
+#     if ($host = niftycorridor.vedaantagrawal.com) {
+#         return 301 https://$host$request_uri;
+#     }
+#     return 404;
+# }

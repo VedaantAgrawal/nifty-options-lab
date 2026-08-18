@@ -1,0 +1,22 @@
+services:
+  niftycorridor:
+    build: .
+    image: niftycorridor:latest
+    container_name: niftycorridor
+    restart: unless-stopped
+    # Bound to localhost only: nginx (on the host) is the sole public entry
+    # point, doing the reverse proxy + Basic Auth. Don't publish 0.0.0.0:8501
+    # here, or Basic Auth becomes bypassable by hitting the container directly.
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      # Named volume, not a bind mount: survives `docker compose up -d --build`
+      # re-deploys, so re-deploying doesn't force re-downloading years of
+      # NSE bhavcopy data. See README.md's disk-space note before your
+      # first full sweep.
+      - niftycorridor_cache:/app/data/cache
+    environment:
+      - PYTHONUNBUFFERED=1
+
+volumes:
+  niftycorridor_cache:
