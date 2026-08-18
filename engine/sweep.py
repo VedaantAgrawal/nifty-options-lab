@@ -22,8 +22,9 @@ from data.expiry_calendar import HolidayCalendar
 from data.providers import NSEBhavcopyProvider, OptionsChainProvider
 from engine.metrics import MetricsResult, compute_metrics
 from engine.position_builder import _resolve_expiry
+from engine.robustness import compute_pbo, compute_sweep_dsr
 from engine.simulator import run_single_trade
-from models.schemas import ParameterGrid, StrategyConfig, Trade
+from models.schemas import ParameterGrid, PBOResult, StrategyConfig, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -196,14 +197,15 @@ def _init_worker(chain: pd.DataFrame, holidays: HolidayCalendar) -> None:
     _worker_holidays = holidays
 
 
-def _run_one_config(args: Tuple[StrategyConfig, date, date]) -> MetricsResult:
+def _run_one_config(args: Tuple[StrategyConfig, date, date]) -> Tuple[MetricsResult, List[Trade]]:
     config, start, end = args
     trades, skipped_entry_dates = run_trade_cycle_loop(config, start, end, _worker_chain, _worker_holidays)
-    return compute_metrics(
+    metrics = compute_metrics(
         trades,
         initial_capital=config.capital,
         num_skipped_insufficient_margin=len(skipped_entry_dates),
     )
+    return metrics, trades
 
 
 def _run_batch(
@@ -213,11 +215,11 @@ def _run_batch(
     chain: pd.DataFrame,
     holidays: HolidayCalendar,
     max_workers: Optional[int],
-) -> List[MetricsResult]:
+) -> List[Tuple[MetricsResult, List[Trade]]]:
     """Run every config in `configs` over [start, end] in parallel worker
-    processes. Returns MetricsResult in the SAME ORDER as `configs`
-    (ProcessPoolExecutor.map preserves input order), so callers can pair
-    results back up by index."""
+    processes. Returns (MetricsResult, trades) in the SAME ORDER as
+    `configs` (ProcessPoolExecutor.map preserves input order), so callers
+    can pair results back up by index."""
     args = [(config, start, end) for config in configs]
     with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker, initargs=(chain, holidays)) as executor:
         return list(executor.map(_run_one_config, args))
@@ -232,6 +234,36 @@ def _flatten_config(config: StrategyConfig) -> dict:
 #: scalar, and doesn't fit a per-config comparison row (or CSV export).
 _METRIC_FIELD_NAMES = [name for name in MetricsResult.model_fields if name != "equity_curve"]
 
+#: SweepResult fields populated from engine.robustness.compute_sweep_dsr,
+#: copied onto each output row.
+_ROBUSTNESS_FIELD_NAMES = ["sharpe_lo_adjusted", "skew", "kurtosis", "dsr", "n_eff_trials", "robustness_flag"]
+
+
+def _build_pnl_matrix(trades_per_config: List[List[Trade]]) -> pd.DataFrame:
+    """(T x N) aligned per-cycle return matrix for engine.robustness, built
+    from each config's own realized trades.
+
+    Indexed by the UNION of exit_dates seen across every config (T rows),
+    columned by config index 0..N-1 (matching the row order of the
+    `configs`/`train_metrics` lists this is built alongside). A config
+    without a trade on some other config's exit_date gets NaN there -- this
+    is expected, not a bug: configs don't necessarily share an identical
+    reentry schedule (e.g. one hit a margin skip another didn't, or their
+    stop-loss triggers diverged), and this alignment can't assume otherwise.
+    effective_n_trials' correlation matrix tolerates NaN (pandas .corr()
+    uses pairwise-complete observations); compute_pbo's CSCV cannot, so its
+    caller is responsible for dropping incomplete rows from whatever subset
+    of columns it actually uses.
+    """
+    series_list = []
+    for idx, trades in enumerate(trades_per_config):
+        if not trades:
+            series_list.append(pd.Series(name=idx, dtype=float))
+            continue
+        returns = {t.exit_date: t.pnl / t.capital_at_risk for t in trades}
+        series_list.append(pd.Series(returns, name=idx))
+    return pd.concat(series_list, axis=1).sort_index()
+
 
 def run_sweep(
     grid: ParameterGrid,
@@ -243,7 +275,9 @@ def run_sweep(
     top_n: int = 20,
     rank_metric: str = "sharpe_ratio",
     max_workers: Optional[int] = None,
-) -> pd.DataFrame:
+    top_n_for_pbo: int = 30,
+    s_splits: int = 10,
+) -> Tuple[pd.DataFrame, PBOResult]:
     """Run every valid StrategyConfig in `grid`'s Cartesian product over
     `train_range`, rank by `rank_metric` (any MetricsResult field except
     equity_curve; higher is always better, including for max_drawdown where
@@ -252,11 +286,33 @@ def run_sweep(
     are visible side by side for every shortlisted config, not just
     whichever one "won" on train.
 
-    Returns one row per config, sorted by train_{rank_metric} descending:
-    the config's own fields, train_* metrics (every config), and
-    validation_* metrics (only the top_n configs; None elsewhere, since
-    those were never run on validation_range -- re-running the whole grid
-    twice would defeat the point of the split).
+    Also runs the engine.robustness anti-overfitting pipeline on the train
+    results: Deflated Sharpe Ratio (Parts A-C) for every config, and
+    Probability of Backtest Overfitting via CSCV (Part D) on the top
+    `top_n_for_pbo` configs by dsr. dsr < 0.90 ("red") excludes a config
+    from `recommended` -- deprioritized, not dropped: it's still a row in
+    the returned DataFrame, fully inspectable.
+
+    Returns (df, pbo_result):
+      df -- one row per config, sorted by train_{rank_metric} descending:
+        the config's own fields, train_* metrics (every config),
+        validation_* metrics (only the top_n configs; None elsewhere, since
+        re-running the whole grid twice would defeat the point of the
+        split), the robustness columns (sharpe_lo_adjusted, skew, kurtosis,
+        dsr, n_eff_trials, robustness_flag), and `recommended` (bool:
+        robustness_flag != "red").
+      pbo_result -- a PBOResult: a property of the sweep/selection process
+        as a whole, not of any individual config, so it isn't a per-row
+        column.
+
+    NOTE: the task that requested this wiring described the per-config
+    return type as `list[SweepResult]`. This still returns the flat
+    DataFrame the previous step built instead -- SweepResult has no
+    train-vs-validation shape (it's a single flat metric set), and
+    reshaping it to fit would mean either duplicating every metric field
+    with train_/validation_ prefixes inside the model too, or dropping the
+    flattened comparison columns that already work. Only the *addition* of
+    PBOResult as a second, separate return value is new.
 
     Pass `chain` directly (e.g. in tests) to skip fetching via `provider`.
     Parallelized with multiprocessing (ProcessPoolExecutor): each config's
@@ -289,14 +345,36 @@ def run_sweep(
         fetch_end = max(train_end, val_end)
         chain = provider.get_options_chain(start=fetch_start, end=fetch_end)
 
-    train_metrics = _run_batch(configs, train_start, train_end, chain, holidays, max_workers)
+    train_results = _run_batch(configs, train_start, train_end, chain, holidays, max_workers)
+    train_metrics = [r[0] for r in train_results]
+    train_trades = [r[1] for r in train_results]
 
     ranked_idx = sorted(range(len(configs)), key=lambda i: getattr(train_metrics[i], rank_metric), reverse=True)
     top_idx = ranked_idx[:top_n]
     top_configs = [configs[i] for i in top_idx]
 
-    val_metrics_for_top = _run_batch(top_configs, val_start, val_end, chain, holidays, max_workers)
-    val_metrics_by_idx = dict(zip(top_idx, val_metrics_for_top))
+    val_results_for_top = _run_batch(top_configs, val_start, val_end, chain, holidays, max_workers)
+    val_metrics_by_idx = dict(zip(top_idx, (r[0] for r in val_results_for_top)))
+
+    # --- Anti-overfitting pipeline (engine.robustness), on train performance ---
+    sweep_df = pd.DataFrame({"trades": train_trades})
+    pnl_matrix = _build_pnl_matrix(train_trades)
+    annotated = compute_sweep_dsr(sweep_df, pnl_matrix)
+
+    dsr_ranked_idx = annotated.sort_values("dsr", ascending=False).index[: max(top_n_for_pbo, 0)]
+    pbo_pnl_matrix = pnl_matrix[dsr_ranked_idx].dropna()
+    if len(pbo_pnl_matrix) < s_splits:
+        raise ValueError(
+            f"Only {len(pbo_pnl_matrix)} cycles have data for every one of the top "
+            f"{len(dsr_ranked_idx)} configs by dsr (need >= s_splits={s_splits} for CSCV) -- "
+            "these configs' reentry schedules diverge too much to compare on a shared time axis."
+        )
+    pbo_dict = compute_pbo(pbo_pnl_matrix, s_splits=s_splits)
+    pbo_result = PBOResult(
+        pbo=pbo_dict["pbo"],
+        sweep_risk_flag=pbo_dict["sweep_risk_flag"],
+        is_oos_pairs=pbo_dict["is_oos_pairs"],
+    )
 
     rows = []
     for i in ranked_idx:
@@ -308,6 +386,9 @@ def run_sweep(
         vm = val_metrics_by_idx.get(i)
         for name in _METRIC_FIELD_NAMES:
             row[f"validation_{name}"] = getattr(vm, name) if vm is not None else None
+        for name in _ROBUSTNESS_FIELD_NAMES:
+            row[name] = annotated.loc[i, name]
+        row["recommended"] = annotated.loc[i, "robustness_flag"] != "red"
         rows.append(row)
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), pbo_result
