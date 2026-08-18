@@ -7,12 +7,13 @@ mocking it away.
 """
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from data.expiry_calendar import HolidayCalendar
 from engine.sweep import generate_configs, run_sweep, run_trade_cycle_loop
-from models.schemas import ParameterGrid, StrategyConfig
+from models.schemas import ParameterGrid, PBOResult, StrategyConfig
 
 COLUMNS = ["date", "expiry_date", "strike", "option_type", "close", "oi", "volume"]
 
@@ -177,12 +178,17 @@ class TestRunSweep:
 
     def test_returns_one_row_per_valid_config(self):
         chain = build_synthetic_chain(CYCLES)
-        df = run_sweep(self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2)
+        df, pbo_result = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2
+        )
         assert len(df) == 4  # tiny 2x2 grid, all combos valid (short_strangle only)
+        assert isinstance(pbo_result, PBOResult)
 
     def test_config_columns_and_metric_columns_present(self):
         chain = build_synthetic_chain(CYCLES)
-        df = run_sweep(self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2)
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2
+        )
         for col in ["structure", "otm_points_call", "stop_loss_pct"]:
             assert col in df.columns
         for prefix in ("train_", "validation_"):
@@ -191,15 +197,39 @@ class TestRunSweep:
         assert "equity_curve" not in df.columns
         assert "train_equity_curve" not in df.columns
 
+    def test_robustness_columns_present_for_every_row(self):
+        chain = build_synthetic_chain(CYCLES)
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2
+        )
+        for col in ["sharpe_lo_adjusted", "skew", "kurtosis", "dsr", "n_eff_trials", "robustness_flag", "recommended"]:
+            assert col in df.columns
+            assert df[col].notna().all()  # every config's DSR is computed, not just the top-N
+        assert df["n_eff_trials"].nunique() == 1  # same value on every row (whole-sweep quantity)
+
+    def test_no_rows_are_dropped_even_when_not_recommended(self):
+        # dsr<0.90 deprioritizes a config (recommended=False), it must not
+        # remove it from the returned DataFrame.
+        chain = build_synthetic_chain(CYCLES)
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2
+        )
+        assert len(df) == 4
+        assert set(df["recommended"].unique()) <= {True, False}
+
     def test_sorted_by_train_rank_metric_descending(self):
         chain = build_synthetic_chain(CYCLES)
-        df = run_sweep(self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2)
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2
+        )
         values = df["train_sharpe_ratio"].tolist()
         assert values == sorted(values, reverse=True)
 
     def test_only_top_n_configs_get_validation_metrics(self):
         chain = build_synthetic_chain(CYCLES)
-        df = run_sweep(self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2)
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2
+        )
         assert df["validation_num_trades"].notna().sum() == 2
         assert df["validation_num_trades"].isna().sum() == 2
         # the validated rows should be exactly the top 2 by train rank
@@ -208,7 +238,9 @@ class TestRunSweep:
 
     def test_validation_trade_count_matches_the_single_validation_cycle(self):
         chain = build_synthetic_chain(CYCLES)
-        df = run_sweep(self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=4, max_workers=2)
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=4, max_workers=2, s_splits=2
+        )
         # VALIDATION_RANGE covers exactly one weekly cycle.
         assert (df["validation_num_trades"] == 1).all()
         # TRAIN_RANGE covers exactly two weekly cycles.
@@ -221,8 +253,8 @@ class TestRunSweep:
 
     def test_custom_rank_metric_is_respected(self):
         chain = build_synthetic_chain(CYCLES)
-        df = run_sweep(
-            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2,
+        df, _ = run_sweep(
+            self._grid(), TRAIN_RANGE, VALIDATION_RANGE, chain=chain, top_n=2, max_workers=2, s_splits=2,
             rank_metric="total_return_abs",
         )
         values = df["train_total_return_abs"].tolist()
@@ -244,3 +276,88 @@ class TestRunSweep:
         chain = build_synthetic_chain(CYCLES)
         with pytest.raises(ValueError):
             run_sweep(grid, TRAIN_RANGE, VALIDATION_RANGE, chain=chain)
+
+
+def _weekly_cycles(n, start=date(2025, 9, 3)):
+    """n consecutive Wed-entry / Tue-expiry weekly cycles."""
+    cycles = []
+    cycle_start = start
+    for _ in range(n):
+        expiry = cycle_start + timedelta(days=6)
+        cycles.append((cycle_start, expiry))
+        cycle_start = expiry + timedelta(days=1)
+    return cycles
+
+
+def _build_random_walk_chain(cycles, seed, spot0=24700.0, strikes=range(23000, 26500, 50),
+                              daily_vol=60.0, idio_vol=1.5):
+    """Correlated-but-noisy premiums: a single shared random-walk 'spot' path
+    driving every strike each day (inducing correlation across nearby
+    strikes/configs -- structurally similar bets, not independent ideas),
+    plus small per-strike idiosyncratic noise, plus standard OTM decay.
+    Zero systematic drift, so there's no true edge anywhere -- mirrors the
+    "overfit noise" fixture in tests/test_robustness.py, but reproduced
+    through the full ingestion -> position-build -> simulate -> reentry
+    pipeline instead of injecting synthetic returns directly.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    spot = spot0
+    for cycle_start, expiry in cycles:
+        d = cycle_start
+        while d <= expiry:
+            if d.weekday() < 5:
+                spot += rng.normal(0, daily_vol)
+                for strike in strikes:
+                    intrinsic_call = max(spot - strike, 0)
+                    intrinsic_put = max(strike - spot, 0)
+                    time_value = max(15.0 - abs(spot - strike) * 0.005, 3.0)
+                    ce = max(intrinsic_call + time_value + rng.normal(0, idio_vol), 0.05)
+                    pe = max(intrinsic_put + time_value + rng.normal(0, idio_vol), 0.05)
+                    rows.append(make_chain_row(d, expiry, strike, "CE", ce))
+                    rows.append(make_chain_row(d, expiry, strike, "PE", pe))
+            d += timedelta(days=1)
+    return pd.DataFrame(rows, columns=COLUMNS)
+
+
+class TestRunSweepOverfitNoiseScenario:
+    """Mirrors tests/test_robustness.py's overfit-noise fixture, but driven
+    through a real run_sweep() call: many near-duplicate short_strangle
+    configs (OTM points a little apart, stop-loss a little apart --
+    structurally similar bets sharing one noisy, zero-drift underlying
+    price path, not independent ideas with genuine edge).
+
+    seed=6 with these exact parameters was verified during development to
+    produce a red PBO flag; n_recommended=0 held across every seed tried
+    (2, 4, 6, 8) with this fixture, so that assertion isn't seed-sensitive,
+    but the PBO>0.5 one specifically is -- see test_robustness.py's own
+    docstring on why PBO has real sampling variance.
+    """
+
+    def _grid(self):
+        return ParameterGrid(
+            structure=["short_strangle"],
+            expiry_cycle=["weekly"],
+            entry_day_of_week=[2],
+            days_to_expiry_at_entry=[4],
+            otm_points_call=[150, 200, 250, 300],
+            otm_points_put=[150, 200, 250, 300],
+            stop_loss_pct=[40, 60],
+            capital=[1_000_000],
+            reentry=["next_cycle"],
+        )
+
+    def test_overfit_noise_sweep_flags_red_with_no_recommended_configs(self):
+        cycles = _weekly_cycles(12)
+        train_range = (cycles[0][0], cycles[8][1])  # first 9 cycles
+        validation_range = (cycles[9][0], cycles[-1][1])  # last 3 cycles
+        chain = _build_random_walk_chain(cycles, seed=6)
+
+        df, pbo_result = run_sweep(
+            self._grid(), train_range, validation_range, chain=chain,
+            top_n=5, max_workers=4, top_n_for_pbo=20, s_splits=6,
+        )
+
+        assert pbo_result.sweep_risk_flag == "red"
+        assert pbo_result.pbo > 0.5
+        assert not df["recommended"].any()
