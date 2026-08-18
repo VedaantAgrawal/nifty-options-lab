@@ -7,7 +7,7 @@ so rows from that layer can be turned directly into `OptionLeg` instances.
 from __future__ import annotations
 
 from datetime import date
-from typing import List, Literal, Optional
+from typing import List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
@@ -255,4 +255,25 @@ class SweepResult(BaseModel):
     robustness_flag: Optional[Literal["green", "amber", "red"]] = Field(
         default=None,
         description="green: dsr>=0.95, amber: 0.90<=dsr<0.95, red: dsr<0.90",
+    )
+
+
+class PBOResult(BaseModel):
+    """Sweep-level Probability of Backtest Overfitting result (see
+    engine/robustness.py's compute_pbo, Bailey/Borwein/Lopez de Prado/Zhu's
+    CSCV). This is a property of the sweep/selection process as a whole,
+    not of any individual config -- it doesn't attach to SweepResult rows.
+    """
+
+    pbo: float = Field(
+        ge=0, le=1,
+        description="Fraction of CSCV combinations where the in-sample-best config "
+        "ranked below the out-of-sample median",
+    )
+    sweep_risk_flag: Literal["green", "amber", "red"] = Field(
+        description="green: pbo<0.20, amber: 0.20<=pbo<=0.50, red: pbo>0.50"
+    )
+    is_oos_pairs: List[Tuple[float, float]] = Field(
+        description="(in-sample Sharpe, out-of-sample Sharpe) of the IS-best config, "
+        "one pair per CSCV combination -- for a degradation scatter plot"
     )
