@@ -105,18 +105,28 @@ repo root are the artifacts these steps use.
 > carefully and the app itself is tested, but do a real build-and-run
 > before trusting this in production — see step 2.
 
-### 1. Point DNS at the server
+### 1. Point DNS at the server (Cloudflare, proxied)
 
-Add an A record (or CNAME, if `vedaantagrawal.com` sits behind something
-like Cloudflare) for the `niftycorridor` subdomain, pointing at your
-server's public IP:
+This deployment sits behind Cloudflare with the proxy **on** (orange
+cloud), not plain DNS. In the Cloudflare dashboard, under
+`vedaantagrawal.com` → DNS → Records → Add record:
 
-```
-niftycorridor.vedaantagrawal.com.   A   <your-server-ip>
-```
+- Type: `A`
+- Name: `niftycorridor`
+- IPv4 address: `<your-server-ip>`
+- Proxy status: **Proxied (orange cloud)**
 
-Wait for it to resolve (`dig niftycorridor.vedaantagrawal.com` / `nslookup`)
-before continuing.
+Then, under SSL/TLS → Overview, set the encryption mode to **Full** or
+**Full (strict)** — never **Flexible**. Flexible has Cloudflare talk plain
+HTTP to this origin while nginx (once certbot is set up in step 5) forces
+an HTTP→HTTPS redirect, and those two fight each other into an infinite
+redirect loop. `nginx.conf.example` is written assuming this proxied
+setup, and already restores the real visitor IP from Cloudflare's
+`CF-Connecting-IP` header (see the comment block at the top of that file
+for how to keep Cloudflare's IP ranges current).
+
+Wait for the record to resolve (`dig niftycorridor.vedaantagrawal.com` /
+`nslookup`) before continuing.
 
 ### 2. Build and run the container
 
@@ -178,11 +188,14 @@ sudo apt-get install -y certbot python3-certbot-nginx
 sudo certbot --nginx -d niftycorridor.vedaantagrawal.com
 ```
 
-Certbot edits the installed nginx config in place to add the TLS
-directives and an HTTP→HTTPS redirect — see the commented-out block at
-the bottom of `nginx.conf.example` for roughly what it adds. Follow the
-prompts; certbot also sets up automatic renewal (systemd timer or cron).
-Verify renewal works without waiting for it to matter:
+Certbot's HTTP-01 challenge passes through Cloudflare's proxy to this
+origin without extra configuration (Cloudflare proxies port 80 too), so
+this works the same proxied or not. Certbot edits the installed nginx
+config in place to add the TLS directives and an HTTP→HTTPS redirect —
+see the commented-out block at the bottom of `nginx.conf.example` for
+roughly what it adds. Follow the prompts; certbot also sets up automatic
+renewal (systemd timer or cron). Verify renewal works without waiting for
+it to matter:
 
 ```bash
 sudo certbot renew --dry-run

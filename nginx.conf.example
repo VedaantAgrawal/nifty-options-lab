@@ -5,6 +5,51 @@
 # README.md's "Deployment" section for the full step-by-step, including the
 # htpasswd setup this config depends on and the certbot command that will
 # rewrite the HTTPS block below for you.
+#
+# Written for a Cloudflare-PROXIED setup (orange cloud on the DNS record).
+# In Cloudflare: SSL/TLS -> Overview -> encryption mode must be "Full" or
+# "Full (strict)". NOT "Flexible" -- Flexible talks plain HTTP to this
+# origin while nginx (once certbot's installed) redirects HTTP->HTTPS,
+# and those two fight each other into an infinite redirect loop.
+
+# --- Restore the real visitor IP behind Cloudflare's proxy ------------------
+# Without this, every request nginx sees appears to come from Cloudflare's
+# edge, not the actual visitor -- access logs and any future IP-based logic
+# would all be wrong. set_real_ip_from lists the IP ranges nginx should
+# trust to supply a real client IP (i.e. Cloudflare's own edge ranges);
+# real_ip_header names which incoming header carries it.
+#
+# Cloudflare's ranges do change occasionally. The list below is a
+# reasonable default, not a guarantee -- verify/refresh from
+# https://www.cloudflare.com/ips-v4 and https://www.cloudflare.com/ips-v6
+# (plain-text lists meant for exactly this) before relying on it in
+# production, and consider a small cron job that re-pulls them periodically
+# and reloads nginx if they've changed. An out-of-date list doesn't break
+# the site -- it just means "real" IP resolution silently degrades if
+# Cloudflare adds a new edge range this list doesn't have yet.
+set_real_ip_from 173.245.48.0/20;
+set_real_ip_from 103.21.244.0/22;
+set_real_ip_from 103.22.200.0/22;
+set_real_ip_from 103.31.4.0/22;
+set_real_ip_from 141.101.64.0/18;
+set_real_ip_from 108.162.192.0/18;
+set_real_ip_from 190.93.240.0/20;
+set_real_ip_from 188.114.96.0/20;
+set_real_ip_from 197.234.240.0/22;
+set_real_ip_from 198.41.128.0/17;
+set_real_ip_from 162.158.0.0/15;
+set_real_ip_from 104.16.0.0/13;
+set_real_ip_from 104.24.0.0/14;
+set_real_ip_from 172.64.0.0/13;
+set_real_ip_from 131.0.72.0/22;
+set_real_ip_from 2400:cb00::/32;
+set_real_ip_from 2606:4700::/32;
+set_real_ip_from 2803:f800::/32;
+set_real_ip_from 2405:b500::/32;
+set_real_ip_from 2405:8100::/32;
+set_real_ip_from 2a06:98c0::/29;
+set_real_ip_from 2c0f:f248::/32;
+real_ip_header CF-Connecting-IP;
 
 server {
     listen 80;
