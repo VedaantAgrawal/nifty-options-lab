@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, timedelta
 from typing import List, Optional, Tuple
 
@@ -19,6 +20,7 @@ from pydantic import ValidationError
 
 from data.expiry_calendar import HolidayCalendar
 from data.providers import NSEBhavcopyProvider, OptionsChainProvider
+from engine.metrics import MetricsResult, compute_metrics
 from engine.position_builder import _resolve_expiry
 from engine.simulator import run_single_trade
 from models.schemas import ParameterGrid, StrategyConfig, Trade
@@ -177,3 +179,135 @@ def run_trade_cycle_loop(
         entry_date = _next_entry_after_exit(trade.exit_date, config, holidays)
 
     return trades, skipped_entry_dates
+
+
+# --- Parallel batch execution ------------------------------------------------
+# Module-level globals set once per worker process via the ProcessPoolExecutor
+# initializer, not passed per-task: with sweeps running into the thousands of
+# configs, re-pickling `chain` (potentially large) for every single task
+# instead of once per worker would dominate runtime.
+_worker_chain: Optional[pd.DataFrame] = None
+_worker_holidays: Optional[HolidayCalendar] = None
+
+
+def _init_worker(chain: pd.DataFrame, holidays: HolidayCalendar) -> None:
+    global _worker_chain, _worker_holidays
+    _worker_chain = chain
+    _worker_holidays = holidays
+
+
+def _run_one_config(args: Tuple[StrategyConfig, date, date]) -> MetricsResult:
+    config, start, end = args
+    trades, skipped_entry_dates = run_trade_cycle_loop(config, start, end, _worker_chain, _worker_holidays)
+    return compute_metrics(
+        trades,
+        initial_capital=config.capital,
+        num_skipped_insufficient_margin=len(skipped_entry_dates),
+    )
+
+
+def _run_batch(
+    configs: List[StrategyConfig],
+    start: date,
+    end: date,
+    chain: pd.DataFrame,
+    holidays: HolidayCalendar,
+    max_workers: Optional[int],
+) -> List[MetricsResult]:
+    """Run every config in `configs` over [start, end] in parallel worker
+    processes. Returns MetricsResult in the SAME ORDER as `configs`
+    (ProcessPoolExecutor.map preserves input order), so callers can pair
+    results back up by index."""
+    args = [(config, start, end) for config in configs]
+    with ProcessPoolExecutor(max_workers=max_workers, initializer=_init_worker, initargs=(chain, holidays)) as executor:
+        return list(executor.map(_run_one_config, args))
+
+
+def _flatten_config(config: StrategyConfig) -> dict:
+    return {name: getattr(config, name) for name in _GRID_FIELD_NAMES}
+
+
+#: MetricsResult fields usable as rank_metric / flattened into DataFrame columns.
+#: equity_curve is excluded -- it's a list of (date, capital) points, not a
+#: scalar, and doesn't fit a per-config comparison row (or CSV export).
+_METRIC_FIELD_NAMES = [name for name in MetricsResult.model_fields if name != "equity_curve"]
+
+
+def run_sweep(
+    grid: ParameterGrid,
+    train_range: Tuple[date, date],
+    validation_range: Tuple[date, date],
+    provider: Optional[OptionsChainProvider] = None,
+    chain: Optional[pd.DataFrame] = None,
+    holidays: Optional[HolidayCalendar] = None,
+    top_n: int = 20,
+    rank_metric: str = "sharpe_ratio",
+    max_workers: Optional[int] = None,
+) -> pd.DataFrame:
+    """Run every valid StrategyConfig in `grid`'s Cartesian product over
+    `train_range`, rank by `rank_metric` (any MetricsResult field except
+    equity_curve; higher is always better, including for max_drawdown where
+    less-negative is the better raw value), and re-run only the top `top_n`
+    over `validation_range` -- so in-sample and out-of-sample performance
+    are visible side by side for every shortlisted config, not just
+    whichever one "won" on train.
+
+    Returns one row per config, sorted by train_{rank_metric} descending:
+    the config's own fields, train_* metrics (every config), and
+    validation_* metrics (only the top_n configs; None elsewhere, since
+    those were never run on validation_range -- re-running the whole grid
+    twice would defeat the point of the split).
+
+    Pass `chain` directly (e.g. in tests) to skip fetching via `provider`.
+    Parallelized with multiprocessing (ProcessPoolExecutor): each config's
+    backtest is independent, and sweeps can run into the thousands of
+    combos. `max_workers=None` uses ProcessPoolExecutor's default
+    (os.process_cpu_count()); pass a small value to keep test runs from
+    paying full process-pool startup overhead.
+    """
+    if rank_metric not in _METRIC_FIELD_NAMES:
+        raise ValueError(
+            f"rank_metric must be a numeric MetricsResult field, got {rank_metric!r} "
+            f"(options: {sorted(_METRIC_FIELD_NAMES)})"
+        )
+
+    configs, num_invalid = generate_configs(grid)
+    if num_invalid:
+        logger.info(
+            "Skipped %d invalid parameter combinations (failed StrategyConfig validation)", num_invalid
+        )
+    if not configs:
+        raise ValueError("No valid StrategyConfig combinations were generated from this grid")
+
+    holidays = holidays or HolidayCalendar.from_csv()
+    train_start, train_end = train_range
+    val_start, val_end = validation_range
+
+    if chain is None:
+        provider = provider or NSEBhavcopyProvider()
+        fetch_start = min(train_start, val_start)
+        fetch_end = max(train_end, val_end)
+        chain = provider.get_options_chain(start=fetch_start, end=fetch_end)
+
+    train_metrics = _run_batch(configs, train_start, train_end, chain, holidays, max_workers)
+
+    ranked_idx = sorted(range(len(configs)), key=lambda i: getattr(train_metrics[i], rank_metric), reverse=True)
+    top_idx = ranked_idx[:top_n]
+    top_configs = [configs[i] for i in top_idx]
+
+    val_metrics_for_top = _run_batch(top_configs, val_start, val_end, chain, holidays, max_workers)
+    val_metrics_by_idx = dict(zip(top_idx, val_metrics_for_top))
+
+    rows = []
+    for i in ranked_idx:
+        config = configs[i]
+        row = _flatten_config(config)
+        tm = train_metrics[i]
+        for name in _METRIC_FIELD_NAMES:
+            row[f"train_{name}"] = getattr(tm, name)
+        vm = val_metrics_by_idx.get(i)
+        for name in _METRIC_FIELD_NAMES:
+            row[f"validation_{name}"] = getattr(vm, name) if vm is not None else None
+        rows.append(row)
+
+    return pd.DataFrame(rows)
